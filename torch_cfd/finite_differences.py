@@ -36,67 +36,69 @@ Example:
 
 import math
 import typing
-from typing import Any, List, Optional, Sequence, Tuple
+from typing import Any, List, Optional, Sequence, Tuple, Union
 
 import torch
 
 from torch_cfd import boundaries, grids
 
 ArrayVector = Sequence[torch.Tensor]
-GridArray = grids.GridArray
 GridVariable = grids.GridVariable
-GridArrayTensor = grids.GridArrayTensor
-GridVariableVector = grids.GridVariableVector
+GridTensor = grids.GridTensor
+GridVariableVector = Union[grids.GridVariableVector, Sequence[grids.GridVariable]]
 
 
-def stencil_sum(*arrays: GridArray) -> GridArray:
-    """Sum arrays across a stencil, with an averaged offset."""
+def stencil_sum(*arrays: GridVariable, return_tensor=False) -> Union[GridVariable, torch.Tensor]:
+    """
+    Sum arrays across a stencil, with an averaged offset.
+    After summing, the offset is averaged across the arrays and bc is set to None
+    """
+    result = torch.stack([array.data for array in arrays]).sum(dim=0)
+
+    if return_tensor:
+        return result
+    
     offset = grids.averaged_offset_arrays(*arrays)
-    # pytype appears to have a bad type signature for sum():
-    # Built-in function sum was called with the wrong arguments [wrong-arg-types]
-    #          Expected: (iterable: Iterable[complex])
-    #   Actually passed: (iterable: Generator[Union[jax.interpreters.xla.DeviceArray, numpy.ndarray], Any, None])
-    result = sum(array.data for array in arrays)  # type: ignore
     grid = grids.consistent_grid_arrays(*arrays)
-    return GridArray(result, offset, grid)
-
+    
+    return GridVariable(result, offset, grid)
 
 @typing.overload
-def forward_difference(u: GridVariable, axis: int) -> GridArray: ...
+def forward_difference(u: GridVariable, axis: int) -> Union[GridVariable, torch.Tensor]: ...
 
 
 @typing.overload
 def forward_difference(
     u: GridVariable, axis: Optional[Tuple[int, ...]] = ...
-) -> Tuple[GridArray, ...]: ...
+) -> Tuple[GridVariable, ...]: ...
 
 
 def forward_difference(u, axis=None):
     """Approximates grads with finite differences in the forward direction."""
     if axis is None:
-        axis = range(u.grid.ndim)
+        axis = range(-u.grid.ndim, 0)
     if not isinstance(axis, int):
         return tuple(
             forward_difference(u, a) for a in axis
         )  # pytype: disable=wrong-arg-types  # always-use-return-annotations
-    diff = stencil_sum(u.shift(+1, axis), -u.array)
+    diff = stencil_sum(u.shift(+1, axis), -u)
     return diff / u.grid.step[axis]
 
 
 @typing.overload
-def central_difference(u: GridVariable, axis: int) -> GridArray: ...
+def central_difference(u: GridVariable, axis: int) -> GridVariable: ...
 
 
 @typing.overload
 def central_difference(
     u: GridVariable, axis: Optional[Tuple[int, ...]]
-) -> Tuple[GridArray, ...]: ...
+) -> Tuple[GridVariable, ...]: ...
 
 
 def central_difference(u, axis=None):
     """Approximates grads with central differences."""
     if axis is None:
-        axis = range(u.grid.ndim)
+        axis = range(-u.grid.ndim, 0)
     if not isinstance(axis, int):
         return tuple(central_difference(u, a) for a in axis)
     diff = stencil_sum(u.shift(+1, axis), -u.shift(-1, axis))
@@ -104,26 +106,26 @@ def central_difference(u, axis=None):
 
 
 @typing.overload
-def backward_difference(u: GridVariable, axis: int) -> GridArray: ...
+def backward_difference(u: GridVariable, axis: int) -> GridVariable: ...
 
 
 @typing.overload
 def backward_difference(
     u: GridVariable, axis: Optional[Tuple[int, ...]]
-) -> Tuple[GridArray, ...]: ...
+) -> Tuple[GridVariable, ...]: ...
 
 
 def backward_difference(u, axis=None):
     """Approximates grads with finite differences in the backward direction."""
     if axis is None:
-        axis = range(u.grid.ndim)
+        axis = range(-u.grid.ndim, 0)
     if not isinstance(axis, int):
         return tuple(backward_difference(u, a) for a in axis)
     diff = stencil_sum(u, -u.shift(-1, axis))
     return diff / u.grid.step[axis]
 
 
-def divergence(v: GridVariableVector) -> GridArray:
+def divergence(v: GridVariableVector) -> GridVariable:
     """Approximates the divergence of `v` using backward differences."""
     grid = grids.consistent_grid_arrays(*v)
     if len(v) != grid.ndim:
@@ -135,7 +137,7 @@ def divergence(v: GridVariableVector) -> GridArray:
     return sum(differences)
 
 
-def centered_divergence(v: GridVariableVector) -> GridArray:
+def centered_divergence(v: GridVariableVector) -> GridVariable:
     """Approximates the divergence of `v` using centered differences."""
     grid = grids.consistent_grid_arrays(*v)
     if len(v) != grid.ndim:
@@ -147,24 +149,27 @@ def centered_divergence(v: GridVariableVector) -> GridArray:
     return sum(differences)
 
 
-def laplacian(u: GridVariable, scales: Tuple[float] = None) -> GridArray:
+def laplacian(u: GridVariable) -> GridVariable:
     """Approximates the Laplacian of `u`."""
-    if scales is None:
-        scales = tuple(1/s**2 for s in u.grid.step)
-
-    result = -2 * u.array * sum(scales)
-    for axis in range(u.grid.ndim):
+    scales = tuple(1 / s**2 for s in u.grid.step)
+    result = -2 * u.data * sum(scales)
+    for axis in range(-u.grid.ndim, 0):
         result += stencil_sum(u.shift(-1, axis), u.shift(+1, axis)) * scales[axis]
     return result
 
-def set_laplacian_matrix(grid: grids.Grid, bc: Sequence[boundaries.BoundaryConditions], device: Optional[torch.device] = None) -> ArrayVector:
+
+def set_laplacian_matrix(
+    grid: grids.Grid,
+    bc: boundaries.BoundaryConditions,
+    device: Optional[torch.device] = None,
+) -> ArrayVector:
     """Initialize the Laplacian operators."""
 
     offset = grid.cell_center
     return laplacian_matrix_w_boundaries(grid, offset=offset, bc=bc, device=device)
 
 
-def laplacian_matrix(n: int, step: float, sparse:bool = False) -> torch.Tensor:
+def laplacian_matrix(n: int, step: float, sparse: bool = False) -> torch.Tensor:
     """
     Create 1D Laplacian operator matrix, with periodic BC.
     modified the scipy.linalg.circulant implementation to native torch
@@ -217,6 +222,9 @@ def _laplacian_boundary_dirichlet_cell_centered(
 
     Returns:
       updated list of 1d laplacians.
+
+    TODO:
+    [ ]: this function is not implemented in the original Jax-CFD code.
     """
     # This function assumes homogeneous boundary, in which case if the offset
     # is 0.5 away from the wall, the ghost cell value u[0] = -u[1]. So the
@@ -250,6 +258,9 @@ def _laplacian_boundary_neumann_cell_centered(
 
     Returns:
       updated list of 1d laplacians.
+
+    TODO
+    [ ]: this function is not implemented in the original Jax-CFD code.
     """
     if side == "lower":
         laplacians[axis][0, 0] = laplacians[axis][0, 0] + 1 / grid.step[axis] ** 2
@@ -290,7 +301,7 @@ def laplacian_matrix_w_boundaries(
         raise NotImplementedError(f"Explicit laplacians are not implemented for {bc}.")
     if laplacians is None:
         laplacians = list(map(laplacian_matrix, grid.shape, grid.step))
-    for axis in range(grid.ndim):
+    for axis in range(-grid.ndim, 0):
         if math.isclose(offset[axis], 0.5):
             for i, side in enumerate(["lower", "upper"]):  # lower and upper boundary
                 if bc.types[axis][i] == boundaries.BCType.NEUMANN:
@@ -330,12 +341,11 @@ def _linear_along_axis(c: GridVariable, offset: float, axis: int) -> GridVariabl
 
     # If offsets differ by an integer, we can just shift `c`.
     if int(offset_delta) == offset_delta:
+        data = grids.shift(c, int(offset_delta), axis).data
         return GridVariable(
-            array=GridArray(
-                data=c.shift(int(offset_delta), axis).data,
-                offset=new_offset,
-                grid=c.grid,
-            ),
+            data=data,
+            offset=new_offset,
+            grid=c.grid,
             bc=c.bc,
         )
 
@@ -347,7 +357,7 @@ def _linear_along_axis(c: GridVariable, offset: float, axis: int) -> GridVariabl
         floor_weight * c.shift(floor, axis).data
         + ceil_weight * c.shift(ceil, axis).data
     )
-    return GridVariable(array=GridArray(data, new_offset, c.grid), bc=c.bc)
+    return GridVariable(data, new_offset, c.grid, c.bc)
 
 
 def linear(
@@ -382,17 +392,21 @@ def linear(
 
 
 @typing.overload
-def gradient_tensor(v: GridVariable) -> GridArrayTensor: ...
+def gradient_tensor(v: GridVariable) -> GridTensor: ...
 
 
 @typing.overload
-def gradient_tensor(v: Sequence[GridVariable]) -> GridArrayTensor: ...
+def gradient_tensor(v: Sequence[GridVariable]) -> GridTensor: ...
+
+
+@typing.overload
+def gradient_tensor(v: GridVariableVector) -> GridTensor: ...
 
 
 def gradient_tensor(v):
     """Approximates the cell-centered gradient of `v`."""
     if not isinstance(v, GridVariable):
-        return GridArrayTensor(torch.stack([gradient_tensor(u) for u in v], dim=-1))
+        return GridTensor(torch.stack([gradient_tensor(u) for u in v], dim=-1))
     grad = []
     for axis in range(v.grid.ndim):
         offset = v.offset[axis]
@@ -406,10 +420,10 @@ def gradient_tensor(v):
         else:
             raise ValueError(f"expected offset values in {{0, 0.5, 1}}, got {offset}")
         grad.append(derivative)
-    return GridArrayTensor(grad)
+    return GridTensor(torch.stack(grad, dim=-1))
 
 
-def curl_2d(v: Sequence[GridVariable]) -> GridArray:
+def curl_2d(v: GridVariableVector) -> GridVariable:
     """Approximates the curl of `v` in 2D using forward differences."""
     if len(v) != 2:
         raise ValueError(f"Length of `v` is not 2: {len(v)}")
