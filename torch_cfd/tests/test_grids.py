@@ -1,910 +1,952 @@
-import numpy as np
-import pytest
+# Copyright 2021 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#      http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Modifications copyright (C) 2025 S.Cao
+# ported Google's Jax-CFD functional template to torch.Tensor operations
+"""Tests for torch_cfd.grids."""
+
+import math
+
 import torch
 
-from torch_cfd import boundaries, grids
+from absl.testing import absltest, parameterized
+
+from torch_cfd import boundaries, grids, test_utils
 
 
-def test_gridarray_basic_ops():
-    grid = grids.Grid((3,))
-    a = grids.GridArray(torch.tensor([1.0, 2.0, 3.0]), offset=(0,), grid=grid)
-    b = grids.GridArray(torch.tensor([4.0, 5.0, 6.0]), offset=(0,), grid=grid)
-    c = a + b
-    d = a * b
-    e = a - b
-    f = a / b
-    assert isinstance(c, grids.GridArray)
-    assert torch.allclose(c.data, torch.tensor([5.0, 7.0, 9.0]))
-    assert torch.allclose(d.data, torch.tensor([4.0, 10.0, 18.0]))
-    assert torch.allclose(e.data, torch.tensor([-3.0, -3.0, -3.0]))
-    assert torch.allclose(f.data, torch.tensor([0.25, 0.4, 0.5]))
+class GridVariableTest(test_utils.TestCase):
+    def test_consistent_offset(self):
+        data = torch.arange(3)
+        grid = grids.Grid((3,))
+        array_offset_0 = grids.GridVariable(data, offset=(0,), grid=grid)
+        array_offset_1 = grids.GridVariable(data, offset=(1,), grid=grid)
+
+        offset = grids.consistent_offset_arrays(array_offset_0, array_offset_0)
+        self.assertEqual(offset, (0,))
+
+        with self.assertRaises(Exception):
+            grids.consistent_offset_arrays(array_offset_0, array_offset_1)
+
+    def test_averaged_offset(self):
+        data = torch.arange(3)
+        grid = grids.Grid((3,))
+        array_offset_0 = grids.GridVariable(data, offset=(0,), grid=grid)
+        array_offset_1 = grids.GridVariable(data, offset=(1,), grid=grid)
+
+        averaged_offset = grids.averaged_offset_arrays(array_offset_0, array_offset_1)
+        self.assertEqual(averaged_offset, (0.5,))
+
+    def test_control_volume_offsets(self):
+        data = torch.arange(5, 5)
+        grid = grids.Grid((5, 5))
+        array = grids.GridVariable(data, offset=(0, 0), grid=grid)
+        cv_offset = grids.control_volume_offsets_arrays(array)
+        self.assertEqual(cv_offset, ((0.5, 0), (0, 0.5)))
+
+    def test_consistent_grid(self):
+        data = torch.arange(3)
+        offset = (0,)
+        array_grid_3 = grids.GridVariable(data, offset, grid=grids.Grid((3,)))
+        array_grid_5 = grids.GridVariable(data, offset, grid=grids.Grid((5,)))
+
+        grid = grids.consistent_grid_arrays(array_grid_3, array_grid_3)
+        self.assertEqual(grid, grids.Grid((3,)))
+
+        with self.assertRaises(Exception):
+            grids.consistent_grid_arrays(array_grid_3, array_grid_5)
+
+    def test_add_sub_correctness(self):
+        values_1 = torch.rand((5, 5))
+        values_2 = torch.rand((5, 5))
+        offsets = (0.5, 0.5)
+        grid = grids.Grid((5, 5))
+        input_array_1 = grids.GridVariable(values_1, offsets, grid)
+        input_array_2 = grids.GridVariable(values_2, offsets, grid)
+        actual_sum = input_array_1 + input_array_2
+        actual_sub = input_array_1 - input_array_2
+        expected_sum = grids.GridVariable(values_1 + values_2, offsets, grid)
+        expected_sub = grids.GridVariable(values_1 - values_2, offsets, grid)
+        self.assertAllClose(actual_sum, expected_sum, atol=1e-7, rtol=1e-12)
+        self.assertAllClose(actual_sub, expected_sub, atol=1e-7, rtol=1e-12)
+
+    def test_add_sub_inplace_correctness(self):
+        values_1 = torch.rand((5, 5))
+        values_2 = torch.rand((5, 5))
+        values_3 = torch.rand((5, 5))
+        offsets = (0.5, 0.5)
+        grid = grids.Grid((5, 5))
+
+        # Test in-place addition
+        input_array_1 = grids.GridVariable(values_1.clone(), offsets, grid)
+        input_array_2 = grids.GridVariable(values_2, offsets, grid)
+        input_array_1 += input_array_2
+        expected_add = grids.GridVariable(values_1 + values_2, offsets, grid)
+        self.assertAllClose(input_array_1, expected_add, atol=1e-7, rtol=1e-12)
+
+        # Test in-place subtraction
+        input_array_3 = grids.GridVariable(values_1.clone(), offsets, grid)
+        input_array_4 = grids.GridVariable(values_3, offsets, grid)
+        input_array_3 -= input_array_4
+        expected_sub = grids.GridVariable(values_1 - values_3, offsets, grid)
+        self.assertAllClose(input_array_3, expected_sub, atol=1e-7, rtol=1e-12)
+
+    def test_add_sub_offset_raise(self):
+        values_1 = torch.rand((5, 5))
+        values_2 = torch.rand((5, 5))
+        offset_1 = (0.5, 0.5)
+        offset_2 = (0.5, 0.0)
+        grid = grids.Grid((5, 5))
+        input_array_1 = grids.GridVariable(values_1, offset_1, grid)
+        input_array_2 = grids.GridVariable(values_2, offset_2, grid)
+        with self.assertRaises(ValueError):
+            _ = input_array_1 + input_array_2
+        with self.assertRaises(ValueError):
+            _ = input_array_1 - input_array_2
+
+    def test_add_sub_grid_raise(self):
+        values_1 = torch.rand((5, 5))
+        values_2 = torch.rand((5, 5))
+        offset = (0.5, 0.5)
+        grid_1 = grids.Grid((5, 5), domain=((0, 1), (0, 1)))
+        grid_2 = grids.Grid((5, 5), domain=((-2, 2), (-2, 2)))
+        input_array_1 = grids.GridVariable(values_1, offset, grid_1)
+        input_array_2 = grids.GridVariable(values_2, offset, grid_2)
+        with self.assertRaises(ValueError):
+            _ = input_array_1 + input_array_2
+        with self.assertRaises(ValueError):
+            _ = input_array_1 - input_array_2
+
+    def test_mul_div_correctness(self):
+        values_1 = torch.rand((5, 5))
+        values_2 = torch.rand((5, 5))
+        scalar = math.pi
+        offset = (0.5, 0.5)
+        grid = grids.Grid((5, 5))
+        input_array_1 = grids.GridVariable(values_1, offset, grid)
+        input_array_2 = grids.GridVariable(values_2, offset, grid)
+        actual_mul = input_array_1 * input_array_2
+        array_1_times_scalar = input_array_1 * scalar
+        expected_1_times_scalar = grids.GridVariable(values_1 * scalar, offset, grid)
+        actual_div = input_array_1 / 2.5
+        expected_div = grids.GridVariable(values_1 / 2.5, offset, grid)
+        expected_mul = grids.GridVariable(values_1 * values_2, offset, grid)
+        self.assertAllClose(actual_mul, expected_mul, atol=1e-7, rtol=1e-12)
+        self.assertAllClose(
+            array_1_times_scalar, expected_1_times_scalar, atol=1e-7, rtol=1e-12
+        )
+        self.assertAllClose(actual_div, expected_div, atol=1e-7, rtol=1e-12)
+
+        # Test in-place scalar multiplication
+        input_array_3 = grids.GridVariable(values_1.clone(), offset, grid)
+        input_array_3 *= scalar
+        expected_inplace_mul = grids.GridVariable(values_1 * scalar, offset, grid)
+        self.assertAllClose(input_array_3, expected_inplace_mul, atol=1e-7, rtol=1e-12)
+
+        # Test in-place scalar division
+        input_array_4 = grids.GridVariable(values_1.clone(), offset, grid)
+        div_scalar = 2.5
+        input_array_4 /= div_scalar
+        expected_inplace_div = grids.GridVariable(values_1 / div_scalar, offset, grid)
+        self.assertAllClose(input_array_4, expected_inplace_div, atol=1e-7, rtol=1e-12)
+
+    def test_unary(self):
+        grid = grids.Grid((10, 10))
+        offset = (0.5, 0.5)
+        u = grids.GridVariable(torch.ones([10, 10]), offset, grid)
+        expected = grids.GridVariable(-torch.ones([10, 10]), offset, grid)
+        actual = -u
+        self.assertAllClose(expected, actual)
+
+    def test_constructor_and_attributes(self):
+        with self.subTest("1d"):
+            grid = grids.Grid((10,))
+            data = torch.zeros((10,), dtype=torch.float32)
+            bc = boundaries.periodic_boundary_conditions(grid.ndim)
+            variable = grids.GridVariable(data, (0.5,), grid, bc)
+            self.assertEqual(variable.bc, bc)
+            self.assertEqual(variable.dtype, torch.float32)
+            self.assertEqual(variable.shape, (10,))
+            self.assertArrayEqual(variable.data, data)
+            self.assertEqual(variable.offset, (0.5,))
+            self.assertEqual(variable.grid, grid)
+
+        with self.subTest("2d"):
+            grid = grids.Grid((10, 10))
+            data = torch.zeros((10, 10), dtype=torch.float32)
+            bc = boundaries.periodic_boundary_conditions(grid.ndim)
+            variable = grids.GridVariable(data, (0.5, 0.5), grid, bc)
+            self.assertEqual(variable.bc, bc)
+            self.assertEqual(variable.dtype, torch.float32)
+            self.assertEqual(variable.shape, (10, 10))
+            self.assertArrayEqual(variable.data, data)
+            self.assertEqual(variable.offset, (0.5, 0.5))
+            self.assertEqual(variable.grid, grid)
+
+        with self.subTest("2d batch dim data"):
+            grid = grids.Grid((10, 10))
+            data = torch.zeros((5, 10, 10), dtype=torch.float32)
+            bc = boundaries.periodic_boundary_conditions(grid.ndim)
+            variable = grids.GridVariable(data, (0.5, 0.5), grid, bc)
+            self.assertEqual(variable.bc, bc)
+            self.assertEqual(variable.dtype, torch.float32)
+            self.assertEqual(variable.shape, (5, 10, 10))
+            self.assertArrayEqual(variable.data, data)
+            self.assertEqual(variable.offset, (0.5, 0.5))
+            self.assertEqual(variable.grid, grid)
+
+        with self.subTest("raises exception"):
+            with self.assertRaisesRegex(
+                ValueError, "Incompatible dimension between grid and bc"
+            ):
+                grid = grids.Grid((10,))  # 1D
+                data = torch.zeros((10,))  # 1D
+                bc = boundaries.periodic_boundary_conditions(ndim=2)  # 2D
+                grids.GridVariable(data, (0.5,), grid, bc)
 
 
-def test_gridarray_scalar_addition():
-    grid = grids.Grid((3,))
-    a = grids.GridArray(torch.tensor([1.0, 2.0, 3.0]), offset=(0,), grid=grid)
-    c = a + 2.0  # __add__
-    d = 2.0 + a  # __radd__
-    assert torch.allclose(c.data, torch.tensor([3.0, 4.0, 5.0]))
-    assert torch.allclose(d.data, torch.tensor([3.0, 4.0, 5.0]))
-
-
-def test_gridarray_scalar_multiplication():
-    grid = grids.Grid((3,))
-    a = grids.GridArray(torch.tensor([1.0, 2.0, 3.0]), offset=(0,), grid=grid)
-    e = a * 2.0  # __mul__
-    f = 2.0 * a  # __rmul__
-    assert torch.allclose(e.data, torch.tensor([2.0, 4.0, 6.0]))
-    assert torch.allclose(f.data, torch.tensor([2.0, 4.0, 6.0]))
-
-
-def test_gridarray_scalar_subtraction():
-    grid = grids.Grid((3,))
-    a = grids.GridArray(torch.tensor([5.0, 6.0, 7.0]), offset=(0,), grid=grid)
-    c = a - 2.0  # __sub__
-    d = 10.0 - a  # __rsub__
-    assert torch.allclose(c.data, torch.tensor([3.0, 4.0, 5.0]))
-    assert torch.allclose(d.data, torch.tensor([5.0, 4.0, 3.0]))
-
-
-def test_gridarray_scalar_division():
-    grid = grids.Grid((3,))
-    a = grids.GridArray(torch.tensor([4.0, 8.0, 12.0]), offset=(0,), grid=grid)
-    e = a / 2.0  # __truediv__
-    f = 24.0 / a  # __rtruediv__
-    assert torch.allclose(e.data, torch.tensor([2.0, 4.0, 6.0]))
-    assert torch.allclose(f.data, torch.tensor([6.0, 3.0, 2.0]))
-
-
-def test_gridarray_offset_check():
-    grid = grids.Grid((3,))
-    a = grids.GridArray(torch.tensor([1.0, 2.0, 3.0]), offset=(0,), grid=grid)
-    b = grids.GridArray(torch.tensor([4.0, 5.0, 6.0]), offset=(1.0,), grid=grid)
-    with pytest.raises(ValueError):
-        _ = a + b
-
-
-def test_gridarray_fft():
-    grid = grids.Grid((4,))
-    a = grids.GridArray(torch.arange(4, dtype=torch.float32), offset=(0,), grid=grid)
-    fa = torch.fft.fft(a)
-    assert isinstance(fa, grids.GridArray)
-    assert torch.allclose(fa.data, torch.fft.fft(a.data))
-
-
-def test_gridarray_to_and_clone():
-    grid = grids.Grid((3,))
-    a = grids.GridArray(torch.tensor([1.0, 2.0, 3.0]), offset=(0,), grid=grid)
-    b = a.to(dtype=torch.float64)
-    c = a.clone()
-    assert b.data.dtype == torch.float64
-    assert torch.allclose(c.data, a.data)
-
-
-def test_gridarray_shape_dtype_properties():
-    grid = grids.Grid((3,))
-    a = grids.GridArray(torch.tensor([1.0, 2.0, 3.0]), offset=(0,), grid=grid)
-    assert a.shape == (3,)
-    assert a.dtype == torch.float32 or a.dtype == torch.float64
-
-
-def test_gridarray_consistent_offset():
-    grid = grids.Grid((3,))
-    a = grids.GridArray(torch.tensor([1.0, 2.0, 3.0]), offset=(0,), grid=grid)
-    b = grids.GridArray(torch.tensor([4.0, 5.0, 6.0]), offset=(0,), grid=grid)
-    assert grids.consistent_offset_arrays(a, b) == (0,)
-
-
-def test_gridarray_averaged_offset():
-    grid = grids.Grid((3,))
-    a = grids.GridArray(torch.tensor([1.0, 2.0, 3.0]), offset=(0,), grid=grid)
-    b = grids.GridArray(torch.tensor([4.0, 5.0, 6.0]), offset=(1.0,), grid=grid)
-    avg = grids.averaged_offset_arrays(a, b)
-    assert np.allclose(avg, (0.5,))
-
-
-def test_gridarray_control_volume_offsets():
-    data = torch.zeros((5, 5))
-    grid = grids.Grid((5, 5))
-    a = grids.GridArray(data, offset=(0, 0), grid=grid)
-    offsets = grids.control_volume_offsets(a)
-    assert offsets == ((0.5, 0), (0, 0.5))
-
-
-def test_gridarray_with_batch_dim_2d():
-    # Create a 2D grid with batch dimension
-    grid = grids.Grid((4, 5))  # 4x5 spatial grid
-    batch_size = 3
-
-    # Create a GridArray with batch dimension [batch, x, y]
-    data = torch.randn(batch_size, 4, 5)
-    a = grids.GridArray(data, offset=(0, 0), grid=grid)
-
-    assert a.shape == (3, 4, 5)
-    assert a.ndim == 3
-    assert a.data.shape == (3, 4, 5)
-
-    # Test basic operations with batch dimension
-    b = a + 1.0
-    assert b.shape == (3, 4, 5)
-    assert torch.allclose(b.data, a.data + 1.0)
-
-    # Test multiplication with another tensor of the same shape
-    c = a * a
-    assert c.shape == (3, 4, 5)
-    assert torch.allclose(c.data, a.data * a.data)
-
-    # Test operations between batched arrays
-    d = grids.GridArray(torch.ones_like(data), offset=(0, 0), grid=grid)
-    result = a + d
-    assert result.shape == (3, 4, 5)
-    assert torch.allclose(result.data, a.data + 1.0)
-
-
-def test_gridarray_applied():
-    grid = grids.Grid((3,))
-    a = grids.GridArray(torch.tensor([1.0, 2.0, 3.0]), offset=(0,), grid=grid)
-    b = grids.GridArray(torch.tensor([4.0, 5.0, 6.0]), offset=(0,), grid=grid)
-    result = grids.applied(torch.add)(a, b)
-    assert isinstance(result, grids.GridArray)
-    assert torch.allclose(result.data, a.data + b.data)
-
-
-def test_gridarray_fft1d():
-    grid = grids.Grid((8,))
-    a = grids.GridArray(torch.arange(8, dtype=torch.float32), offset=(0,), grid=grid)
-    fa = torch.fft.fft(a)
-    assert isinstance(fa, grids.GridArray)
-    assert torch.allclose(fa.data, torch.fft.fft(a.data))
-
-
-def test_gridarray_ifft1d():
-    grid = grids.Grid((8,))
-    a = grids.GridArray(torch.arange(8, dtype=torch.float32), offset=(0,), grid=grid)
-    fa = torch.fft.fft(a)
-    ia = torch.fft.ifft(fa)
-    assert isinstance(ia, grids.GridArray)
-    # Should recover original (within numerical tolerance)
-    assert torch.allclose(ia.data.real, a.data, atol=1e-6)
-
-
-def test_gridarray_fft2d():
-    grid = grids.Grid((4, 4))
-    a = grids.GridArray(
-        torch.arange(16, dtype=torch.float32).reshape(4, 4), offset=(0, 0), grid=grid
+class GridVariableBoundaryTest(test_utils.TestCase):
+    @parameterized.parameters(
+        dict(
+            shape=(10,),
+            offset=(0.0,),
+        ),
+        dict(
+            shape=(10,),
+            offset=(0.5,),
+        ),
+        dict(
+            shape=(10,),
+            offset=(1.0,),
+        ),
+        dict(
+            shape=(10, 10),
+            offset=(1.0, 0.0),
+        ),
     )
-    fa = torch.fft.fft2(a)
-    assert isinstance(fa, grids.GridArray)
-    assert torch.allclose(fa.data, torch.fft.fft2(a.data))
+    def test_interior_consistency_periodic(self, shape, offset):
+        grid = grids.Grid(shape)
+        data = torch.randint(0, 10, shape)
+        bc = boundaries.periodic_boundary_conditions(ndim=len(shape))
+        u = grids.GridVariable(data, offset, grid, bc)
+        u_interior = u.trim_boundary()
+        self.assertArrayEqual(u_interior.data, u.data)
 
-
-def test_gridarray_ifft2d():
-    grid = grids.Grid((4, 4))
-    a = grids.GridArray(
-        torch.arange(16, dtype=torch.float32).reshape(4, 4), offset=(0, 0), grid=grid
+    @parameterized.parameters(
+        dict(
+            shape=(10,),
+            bc=boundaries.dirichlet_boundary_conditions(ndim=1),
+        ),
+        dict(
+            shape=(10,),
+            bc=boundaries.neumann_boundary_conditions(ndim=1),
+        ),
+        dict(
+            shape=(10, 10),
+            bc=boundaries.dirichlet_boundary_conditions(ndim=2),
+        ),
+        dict(
+            shape=(10, 10),
+            bc=boundaries.neumann_boundary_conditions(ndim=2),
+        ),
     )
-    fa = torch.fft.fft2(a)
-    ia = torch.fft.ifft2(fa)
-    assert isinstance(ia, grids.GridArray)
-    assert torch.allclose(ia.data.real, a.data, atol=1e-6)
+    def test_interior_consistency_no_edge_offsets(self, bc, shape):
+        grid = grids.Grid(shape)
+        data = torch.randint(0, 10, shape)
+        u = grids.GridVariable(data, (0.5,) * len(shape), grid, bc)
+        u_interior = u.trim_boundary()
+        self.assertArrayEqual(u_interior.data, u.data)
 
-
-def test_gridarray_rfft_irfft():
-    grid = grids.Grid((8,))
-    a = grids.GridArray(torch.arange(8, dtype=torch.float32), offset=(0,), grid=grid)
-    ra = torch.fft.rfft(a)
-    assert isinstance(ra, grids.GridArray)
-    ira = torch.fft.irfft(ra, n=a.data.shape[0])
-    assert isinstance(ira, grids.GridArray)
-    assert torch.allclose(ira.data, a.data, atol=1e-6)
-
-
-def test_gridvariable_basic_ops():
-    grid = grids.Grid((3,))
-    bc = boundaries.HomogeneousBoundaryConditions(
-        ((boundaries.BCType.PERIODIC, boundaries.BCType.PERIODIC),)
+    @parameterized.parameters(
+        dict(
+            shape=(10,),
+            bc=boundaries.neumann_boundary_conditions(ndim=1),
+            offset=(0.5,),
+        ),
+        dict(
+            shape=(10, 10),
+            bc=boundaries.neumann_boundary_conditions(ndim=2),
+            offset=(0.5, 0.5),
+        ),
     )
+    def test_interior_consistency_neumann(self, shape, bc, offset):
+        grid = grids.Grid(shape)
+        data = torch.randint(0, 10, shape)
+        u = grids.GridVariable(data, offset, grid, bc)
+        u_interior = u.trim_boundary()
+        self.assertArrayEqual(u_interior.data, u.data)
 
-    # Create GridArrays
-    a_array = grids.GridArray(torch.tensor([1.0, 2.0, 3.0]), offset=(0,), grid=grid)
-    b_array = grids.GridArray(torch.tensor([4.0, 5.0, 6.0]), offset=(0,), grid=grid)
-
-    # Create GridVariables
-    a = grids.GridVariable(a_array, bc)
-    b = grids.GridVariable(b_array, bc)
-
-    # Test operations
-    c = a + b
-    d = a * b
-    e = a - b
-    f = a / b
-
-    assert isinstance(c, grids.GridVariable)
-    assert torch.allclose(c.data, torch.tensor([5.0, 7.0, 9.0]))
-    assert torch.allclose(d.data, torch.tensor([4.0, 10.0, 18.0]))
-    assert torch.allclose(e.data, torch.tensor([-3.0, -3.0, -3.0]))
-    assert torch.allclose(f.data, torch.tensor([0.25, 0.4, 0.5]))
-
-    # Verify boundary conditions are preserved
-    assert c.bc == a.bc
-    assert d.bc == a.bc
-    assert e.bc == a.bc
-    assert f.bc == a.bc
-
-
-def test_gridvariable_tensor_ops():
-    grid = grids.Grid((3,))
-    bc = boundaries.HomogeneousBoundaryConditions(
-        ((boundaries.BCType.PERIODIC, boundaries.BCType.PERIODIC),)
+    @parameterized.parameters(
+        dict(
+            shape=(10,),
+            bc=boundaries.HomogeneousBoundaryConditions(
+                ((grids.BCType.DIRICHLET, grids.BCType.DIRICHLET),)
+            ),
+            offset=(0.0,),
+        ),
+        dict(
+            shape=(10, 10),
+            bc=boundaries.dirichlet_boundary_conditions(ndim=2),
+            offset=(0.0, 0.0),
+        ),
     )
+    def test_interior_consistency_edge_offsets_dirichlet(self, shape, bc, offset):
+        grid = grids.Grid(shape)
+        data = torch.randint(0, 10, shape)
+        u = grids.GridVariable(data, offset, grid, bc)
+        u_interior = u.trim_boundary()
+        self.assertEqual(u_interior.offset, tuple(offset + 1 for offset in u.offset))
+        self.assertEqual(u_interior.grid.ndim, u.grid.ndim)
+        self.assertEqual(u_interior.grid.step, u.grid.step)
 
-    # Create GridArray and GridVariable
-    a_array = grids.GridArray(torch.tensor([1.0, 2.0, 3.0]), offset=(0,), grid=grid)
-    a = grids.GridVariable(a_array, bc)
+    def test_interior_dirichlet(self):
+        data = torch.tensor(
+            [
+                [11, 12, 13, 14, 15],
+                [21, 22, 23, 24, 25],
+                [31, 32, 33, 34, 35],
+                [41, 42, 43, 44, 45],
+            ]
+        )
 
-    # Test operations with torch.Tensor
-    tensor = torch.tensor([4.0, 5.0, 6.0])
+        grid = grids.Grid(shape=(4, 5), domain=((0, 1), (0, 1)))
+        bc = boundaries.dirichlet_boundary_conditions(ndim=2)
 
-    c = a + tensor
-    d = tensor + a
-    e = a * tensor
-    f = tensor * a
-    g = a / tensor
-    h = tensor / a
+        with self.subTest("offset=(1, 0.5)"):
+            offset = (1.0, 0.5)
+            u = grids.GridVariable(data, offset, grid, bc)
+            u_interior = u.trim_boundary()
+            answer = torch.tensor(
+                [[11, 12, 13, 14, 15], [21, 22, 23, 24, 25], [31, 32, 33, 34, 35]]
+            )
+            self.assertArrayEqual(u_interior.data, answer)
+            self.assertEqual(u_interior.offset, offset)
+            self.assertEqual(u.grid, grid)
 
-    assert isinstance(c, grids.GridVariable)
-    assert isinstance(d, grids.GridVariable)
-    assert torch.allclose(c.data, torch.tensor([5.0, 7.0, 9.0]))
-    assert torch.allclose(d.data, torch.tensor([5.0, 7.0, 9.0]))
-    assert torch.allclose(e.data, torch.tensor([4.0, 10.0, 18.0]))
-    assert torch.allclose(f.data, torch.tensor([4.0, 10.0, 18.0]))
-    assert torch.allclose(g.data, torch.tensor([0.25, 0.4, 0.5]))
-    assert torch.allclose(h.data, torch.tensor([4.0, 2.5, 2.0]))
+        with self.subTest("offset=(1, 1)"):
+            offset = (1.0, 1.0)
+            u = grids.GridVariable(data, offset, grid, bc)
+            u_interior = u.trim_boundary()
+            answer = torch.tensor(
+                [[11, 12, 13, 14], [21, 22, 23, 24], [31, 32, 33, 34]]
+            )
+            self.assertArrayEqual(u_interior.data, answer)
+            self.assertEqual(u_interior.grid, grid)
 
-    # Verify boundary conditions are preserved
-    assert c.bc == a.bc
-    assert d.bc == a.bc
+        with self.subTest("offset=(0.0, 0.5)"):
+            offset = (0.0, 0.5)
+            u = grids.GridVariable(data, offset, grid, bc)
+            u_interior = u.trim_boundary()
+            answer = torch.tensor(
+                [[21, 22, 23, 24, 25], [31, 32, 33, 34, 35], [41, 42, 43, 44, 45]]
+            )
+            self.assertArrayEqual(u_interior.data, answer)
+            self.assertEqual(u_interior.grid, grid)
 
+        with self.subTest("offset=(0.0, 0.0)"):
+            offset = (0.0, 0.0)
+            u = grids.GridVariable(data, offset, grid, bc)
+            u_interior = u.trim_boundary()
+            answer = torch.tensor(
+                [[22, 23, 24, 25], [32, 33, 34, 35], [42, 43, 44, 45]]
+            )
+            self.assertArrayEqual(u_interior.data, answer)
+            self.assertEqual(u_interior.grid, grid)
 
-def test_gridvariable_gridarray_ops():
-    grid = grids.Grid((3,))
-    bc = boundaries.HomogeneousBoundaryConditions(
-        ((boundaries.BCType.PERIODIC, boundaries.BCType.PERIODIC),)
+        with self.subTest("offset=(0.5, 0.0)"):
+            offset = (0.5, 0.0)
+            u = grids.GridVariable(data, offset, grid, bc)
+            u_interior = u.trim_boundary()
+            answer = torch.tensor(
+                [[12, 13, 14, 15], [22, 23, 24, 25], [32, 33, 34, 35], [42, 43, 44, 45]]
+            )
+            self.assertArrayEqual(u_interior.data, answer)
+            self.assertEqual(u_interior.grid, grid)
+
+        # this is consistent for all offsets, not just edge and center.
+        with self.subTest("offset=(0.25, 0.75)"):
+            offset = (0.25, 0.75)
+            u = grids.GridVariable(data, offset, grid, bc)
+            u_interior = u.trim_boundary()
+            self.assertArrayEqual(u_interior.data, data)
+            self.assertEqual(u_interior.grid, grid)
+
+    @parameterized.parameters(
+        dict(
+            shape=(10,),
+            bc=boundaries.periodic_boundary_conditions(ndim=1),
+            padding=(1, 1),
+            dim=0,
+        ),
+        dict(
+            shape=(10, 10),
+            bc=boundaries.dirichlet_boundary_conditions(ndim=2),
+            padding=(2, 1),
+            dim=1,
+        ),
     )
+    def test_shift_pad_trim(self, shape, bc, padding, dim):
+        grid = grids.Grid(shape)
+        data = torch.randint(0, 10, shape)
+        u = grids.GridVariable(data, (0.5,) * len(shape), grid, bc)
 
-    # Create GridArray and GridVariable
-    a_array = grids.GridArray(torch.tensor([1.0, 2.0, 3.0]), offset=(0,), grid=grid)
-    b_array = grids.GridArray(torch.tensor([4.0, 5.0, 6.0]), offset=(0,), grid=grid)
-    a = grids.GridVariable(a_array, bc)
+        with self.subTest("shift"):
+            self.assertArrayEqual(u.shift(offset=1, dim=dim), bc.shift(u, 1, dim))
 
-    # Test operations with GridArray
-    c = a + b_array
-    d = b_array + a
-    e = a * b_array
-    f = b_array * a
-    g = a / b_array
-    h = b_array / a
+        with self.subTest("raises exception"):
+            with self.assertRaisesRegex(
+                ValueError, "Incompatible dimension between grid and bc"
+            ):
+                grid = grids.Grid((10,))
+                data = torch.zeros((10,))
+                array = grids.GridVariable(data, offset=(0.5,), grid=grid)  # 1D
+                bc = boundaries.dirichlet_boundary_conditions(ndim=2)  # 2D
+                grids.GridVariable(data, (0.5,), grid, bc)
 
-    assert isinstance(c, grids.GridVariable)
-    assert isinstance(d, grids.GridVariable)
-    assert torch.allclose(c.data, torch.tensor([5.0, 7.0, 9.0]))
-    assert torch.allclose(d.data, torch.tensor([5.0, 7.0, 9.0]))
-    assert torch.allclose(e.data, torch.tensor([4.0, 10.0, 18.0]))
-    assert torch.allclose(f.data, torch.tensor([4.0, 10.0, 18.0]))
-    assert torch.allclose(g.data, torch.tensor([0.25, 0.4, 0.5]))
-    assert torch.allclose(h.data, torch.tensor([4.0, 2.5, 2.0]))
+    def test_unique_boundary_conditions(self):
+        grid = grids.Grid((5,))
+        bc1 = boundaries.periodic_boundary_conditions(ndim=1)
+        bc2 = boundaries.dirichlet_boundary_conditions(ndim=1)
+        x_bc1 = grids.GridVariable(torch.arange(5), (0.5,), grid, bc1)
+        y_bc1 = grids.GridVariable(torch.arange(5), (0.5,), grid, bc1)
+        z_bc2 = grids.GridVariable(torch.arange(5), (0.5,), grid, bc2)
 
-    # Verify boundary conditions are preserved
-    assert c.bc == a.bc
-    assert d.bc == a.bc
+        bc = grids.consistent_bc_arrays(x_bc1, y_bc1)
+        self.assertEqual(bc, bc1)
 
+        bc = grids.consistent_bc_arrays(x_bc1, y_bc1, z_bc2)
+        self.assertIsNone(bc)
 
-def test_gridvariable_scalar_ops():
-    grid = grids.Grid((3,))
-    bc = boundaries.HomogeneousBoundaryConditions(
-        ((boundaries.BCType.PERIODIC, boundaries.BCType.PERIODIC),)
+    def test_trim_boundary_cell_center(self):
+        """Test boundary operations when each batch element has different data."""
+        shape = (6, 6)
+        grid = grids.Grid(shape)
+
+        # Create different data for each batch element
+        data = torch.randn(*shape)
+
+        bc = boundaries.dirichlet_boundary_conditions(ndim=2)
+
+        u = grids.GridVariable(data, (0.5, 0.5), grid, bc)
+        u_interior = u.trim_boundary()
+
+        # Check that each batch element is processed independently
+        self.assertEqual(
+            u_interior.shape, (6, 6)
+        )  # cell center data should remain the same shape
+
+class GridVariableBoundaryTestBatch(test_utils.TestCase):
+    """Test boundary behavior with batch dimensions in 2D data."""
+
+    @parameterized.parameters(
+        dict(
+            batch_size=3,
+            shape=(10,),
+            offset=(1.0,),
+        ),
+        dict(
+            batch_size=2,
+            shape=(10, 10),
+            offset=(1.0, 0.0),
+        ),
     )
+    def test_interior_consistency_periodic_batch(self, batch_size, shape, offset):
+        """Test that periodic boundary conditions work with batch dimensions."""
+        grid = grids.Grid(shape)
+        # Create batched data: (batch_size, *shape)
+        data = torch.randint(0, 10, (batch_size, *shape))
+        bc = boundaries.periodic_boundary_conditions(ndim=len(shape))
+        u = grids.GridVariable(data, offset, grid, bc)
+        u_interior = u.trim_boundary()
 
-    # Create GridVariable
-    a_array = grids.GridArray(torch.tensor([1.0, 2.0, 3.0]), offset=(0,), grid=grid)
-    a = grids.GridVariable(a_array, bc)
+        # For periodic boundaries, interior should equal original data
+        self.assertArrayEqual(u_interior.data, u.data)
+        self.assertEqual(u_interior.shape, (batch_size, *shape))
 
-    # Test operations with scalar
-    c = a + 2.0
-    d = 2.0 + a
-    e = a * 2.0
-    f = 2.0 * a
-    g = a / 2.0
-    h = 2.0 / a
-
-    assert isinstance(c, grids.GridVariable)
-    assert isinstance(d, grids.GridVariable)
-    assert torch.allclose(c.data, torch.tensor([3.0, 4.0, 5.0]))
-    assert torch.allclose(d.data, torch.tensor([3.0, 4.0, 5.0]))
-    assert torch.allclose(e.data, torch.tensor([2.0, 4.0, 6.0]))
-    assert torch.allclose(f.data, torch.tensor([2.0, 4.0, 6.0]))
-    assert torch.allclose(g.data, torch.tensor([0.5, 1.0, 1.5]))
-    assert torch.allclose(h.data, torch.tensor([2.0, 1.0, 2.0 / 3.0]))
-
-    # Verify boundary conditions are preserved
-    assert c.bc == a.bc
-    assert d.bc == a.bc
-
-
-def test_gridvariable_bc_check():
-    grid = grids.Grid((3,))
-    bc1 = boundaries.HomogeneousBoundaryConditions(
-        ((boundaries.BCType.PERIODIC, boundaries.BCType.PERIODIC),)
+    @parameterized.parameters(
+        dict(
+            batch_size=3,
+            shape=(10,),
+            bc=boundaries.neumann_boundary_conditions(ndim=1),
+        ),
+        dict(
+            batch_size=2,
+            shape=(10, 10),
+            bc=boundaries.dirichlet_boundary_conditions(ndim=2),
+        ),
+        dict(
+            batch_size=4,
+            shape=(10, 10),
+            bc=boundaries.neumann_boundary_conditions(ndim=2),
+        ),
     )
-    bc2 = boundaries.HomogeneousBoundaryConditions(
-        ((boundaries.BCType.DIRICHLET, boundaries.BCType.DIRICHLET),)
+    def test_interior_consistency_no_edge_offsets_batch(self, batch_size, bc, shape):
+        """Test boundary behavior with non-edge offsets and batch dimensions."""
+        grid = grids.Grid(shape)
+        data = torch.randint(0, 10, (batch_size, *shape))
+        u = grids.GridVariable(data, (0.5,) * len(shape), grid, bc)
+        u_interior = u.trim_boundary()
+
+        # For non-edge offsets, interior should equal original data
+        self.assertArrayEqual(u_interior.data, u.data)
+        self.assertEqual(u_interior.shape, (batch_size, *shape))
+
+    @parameterized.parameters(
+        dict(
+            batch_size=2,
+            shape=(10,),
+            bc=boundaries.neumann_boundary_conditions(ndim=1),
+            offset=(0.5,),
+        ),
+        dict(
+            batch_size=3,
+            shape=(10, 10),
+            bc=boundaries.neumann_boundary_conditions(ndim=2),
+            offset=(0.5, 0.5),
+        ),
     )
+    def test_interior_consistency_neumann_batch(self, batch_size, shape, bc, offset):
+        """Test Neumann boundary conditions with batch dimensions."""
+        grid = grids.Grid(shape)
+        data = torch.randint(0, 10, (batch_size, *shape))
+        u = grids.GridVariable(data, offset, grid, bc)
+        u_interior = u.trim_boundary()
 
-    # Create GridVariables with different boundary conditions
-    a_array = grids.GridArray(torch.tensor([1.0, 2.0, 3.0]), offset=(0,), grid=grid)
-    b_array = grids.GridArray(torch.tensor([4.0, 5.0, 6.0]), offset=(0,), grid=grid)
+        self.assertArrayEqual(u_interior.data, u.data)
+        self.assertEqual(u_interior.shape, (batch_size, *shape))
 
-    a = grids.GridVariable(a_array, bc1)
-    b = grids.GridVariable(b_array, bc2)
-
-    # Test that operations between GridVariables with different BCs raise errors
-    with pytest.raises(ValueError):
-        _ = a + b
-
-
-def test_gridarray_unary_ops():
-    """Test unary operations for GridArray."""
-    grid = grids.Grid((3,))
-    
-    # Create test GridArray
-    a = grids.GridArray(torch.tensor([-1.0, 2.0, -3.0]), offset=(0,), grid=grid)
-    
-    # Test negation (__neg__)
-    neg_a = -a
-    assert isinstance(neg_a, grids.GridArray)
-    assert torch.allclose(neg_a.data, torch.tensor([1.0, -2.0, 3.0]))
-    assert neg_a.offset == a.offset
-    assert neg_a.grid is a.grid
-    
-    # Test absolute value (abs)
-    abs_a = abs(a)
-    assert isinstance(abs_a, grids.GridArray)
-    assert torch.allclose(abs_a.data, torch.tensor([1.0, 2.0, 3.0]))
-    assert abs_a.offset == a.offset
-    assert abs_a.grid is a.grid
-    
-    # Test positive (__pos__)
-    pos_a = +a
-    assert isinstance(pos_a, grids.GridArray)
-    assert torch.allclose(pos_a.data, a.data)
-    assert pos_a.offset == a.offset
-    assert pos_a.grid is a.grid
-    
-    # Test ceil/floor
-    b = grids.GridArray(torch.tensor([1.2, 2.7, 3.5]), offset=(0,), grid=grid)
-    ceil_b = torch.ceil(b)
-    floor_b = torch.floor(b)
-    
-    assert isinstance(ceil_b, grids.GridArray)
-    assert isinstance(floor_b, grids.GridArray)
-    assert torch.allclose(ceil_b.data, torch.tensor([2.0, 3.0, 4.0]))
-    assert torch.allclose(floor_b.data, torch.tensor([1.0, 2.0, 3.0]))
-    
-    # Test round
-    round_b = torch.round(b)
-    assert isinstance(round_b, grids.GridArray)
-    assert torch.allclose(round_b.data, torch.tensor([1.0, 3.0, 4.0]))
-    
-    # Test sqrt
-    c = grids.GridArray(torch.tensor([4.0, 9.0, 16.0]), offset=(0,), grid=grid)
-    sqrt_c = torch.sqrt(c)
-    assert isinstance(sqrt_c, grids.GridArray)
-    assert torch.allclose(sqrt_c.data, torch.tensor([2.0, 3.0, 4.0]))
-    
-    # Test exp
-    exp_a = torch.exp(a)
-    assert isinstance(exp_a, grids.GridArray)
-    assert torch.allclose(exp_a.data, torch.exp(a.data))
-
-def test_gridvariable_unary_ops():
-    """Test unary operations for GridVariable."""
-    grid = grids.Grid((3,))
-    bc = boundaries.HomogeneousBoundaryConditions(
-        ((boundaries.BCType.PERIODIC, boundaries.BCType.PERIODIC),)
+    @parameterized.parameters(
+        dict(
+            batch_size=2,
+            shape=(10,),
+            bc=boundaries.dirichlet_boundary_conditions(ndim=1),
+            offset=(0.0,),
+        ),
+        dict(
+            batch_size=3,
+            shape=(10, 10),
+            bc=boundaries.dirichlet_boundary_conditions(ndim=2),
+            offset=(0.0, 0.0),
+        ),
     )
-    
-    # Create test GridVariable
-    array = grids.GridArray(torch.tensor([-1.0, 2.0, -3.0]), offset=(0,), grid=grid)
-    a = grids.GridVariable(array, bc)
-    
-    # Test negation (__neg__)
-    neg_a = -a
-    assert isinstance(neg_a, grids.GridVariable)
-    assert torch.allclose(neg_a.data, torch.tensor([1.0, -2.0, 3.0]))
-    assert neg_a.bc is a.bc
-    
-    # Test absolute value (abs)
-    abs_a = abs(a)
-    assert isinstance(abs_a, grids.GridVariable)
-    assert torch.allclose(abs_a.data, torch.tensor([1.0, 2.0, 3.0]))
-    assert abs_a.bc is a.bc
-    
-    # Test positive (__pos__)
-    pos_a = +a
-    assert isinstance(pos_a, grids.GridVariable)
-    assert torch.allclose(pos_a.data, a.data)
-    assert pos_a.bc is a.bc
+    def test_interior_consistency_edge_offsets_dirichlet_batch(
+        self, batch_size, shape, bc, offset
+    ):
+        """Test Dirichlet boundary conditions with edge offsets and batch dimensions."""
+        grid = grids.Grid(shape)
+        data = torch.randint(0, 10, (batch_size, *shape))
+        u = grids.GridVariable(data, offset, grid, bc)
+        u_interior = u.trim_boundary()
 
+        # Check offset adjustment
+        self.assertEqual(u_interior.offset, tuple(offset + 1 for offset in u.offset))
+        self.assertEqual(u_interior.grid.ndim, u.grid.ndim)
+        self.assertEqual(u_interior.grid.step, u.grid.step)
 
-def test_gridarray_torch_functions():
-    """Test various torch functions on GridArray."""
-    grid = grids.Grid((3,))
-    a = grids.GridArray(torch.tensor([1.0, 2.0, 3.0]), offset=(0,), grid=grid)
-    b = grids.GridArray(torch.tensor([4.0, 5.0, 6.0]), offset=(0,), grid=grid)
-    
-    # Test sin/cos/tan
-    sin_a = torch.sin(a)
-    cos_a = torch.cos(a)
-    tan_a = torch.tan(a)
-    
-    assert isinstance(sin_a, grids.GridArray)
-    assert isinstance(cos_a, grids.GridArray)
-    assert isinstance(tan_a, grids.GridArray)
-    assert torch.allclose(sin_a.data, torch.sin(a.data))
-    assert torch.allclose(cos_a.data, torch.cos(a.data))
-    assert torch.allclose(tan_a.data, torch.tan(a.data))
-    
-    # Test max/min
-    max_ab = torch.maximum(a, b)
-    min_ab = torch.minimum(a, b)
-    
-    assert isinstance(max_ab, grids.GridArray)
-    assert isinstance(min_ab, grids.GridArray)
-    assert torch.allclose(max_ab.data, torch.maximum(a.data, b.data))
-    assert torch.allclose(min_ab.data, torch.minimum(a.data, b.data))
-    
-    # Test pow
-    pow_a = torch.pow(a, 2)
-    assert isinstance(pow_a, grids.GridArray)
-    assert torch.allclose(pow_a.data, torch.pow(a.data, 2))
+        # Check that batch dimension is preserved
+        self.assertEqual(u_interior.data.shape[0], batch_size)
 
-def test_gridarrayvector_error_cases():
-    """Test error cases for GridArrayVector operations."""
-    grid = grids.Grid((3,))
+    def test_interior_dirichlet_batch(self):
+        """Test Dirichlet boundary trimming with batch dimensions using specific data."""
+        batch_size = 2
 
-    # Create GridArrays
-    a1 = grids.GridArray(torch.tensor([1.0, 2.0, 3.0]), offset=(0,), grid=grid)
-    a2 = grids.GridArray(torch.tensor([4.0, 5.0, 6.0]), offset=(0,), grid=grid)
+        # Create identical data for each batch element for easier testing
+        single_data = torch.tensor(
+            [
+                [11, 12, 13, 14, 15],
+                [21, 22, 23, 24, 25],
+                [31, 32, 33, 34, 35],
+                [41, 42, 43, 44, 45],
+            ]
+        )
+        data = single_data.unsqueeze(0).repeat(batch_size, 1, 1)
 
-    b1 = grids.GridArray(torch.tensor([2.0, 3.0, 4.0]), offset=(0,), grid=grid)
+        grid = grids.Grid(shape=(4, 5), domain=((0, 1), (0, 1)))
+        bc = boundaries.dirichlet_boundary_conditions(ndim=2)
 
-    # Create GridArrayVectors of different lengths
-    avec = grids.GridArrayVector([a1, a2])
-    bvec = grids.GridArrayVector([b1])
+        with self.subTest("offset=(1, 0.5)"):
+            offset = (1.0, 0.5)
+            u = grids.GridVariable(data, offset, grid, bc)
+            u_interior = u.trim_boundary()
+            expected_single = torch.tensor(
+                [[11, 12, 13, 14, 15], [21, 22, 23, 24, 25], [31, 32, 33, 34, 35]]
+            )
+            expected_batch = expected_single.unsqueeze(0).repeat(batch_size, 1, 1)
+            self.assertArrayEqual(u_interior.data, expected_batch)
+            self.assertEqual(u_interior.offset, offset)
+            self.assertEqual(u_interior.shape, (batch_size, 3, 5))
 
-    # Test addition with vectors of different lengths
-    with pytest.raises(ValueError):
-        _ = avec + bvec
+        with self.subTest("offset=(1, 1)"):
+            offset = (1.0, 1.0)
+            u = grids.GridVariable(data, offset, grid, bc)
+            u_interior = u.trim_boundary()
+            expected_single = torch.tensor(
+                [[11, 12, 13, 14], [21, 22, 23, 24], [31, 32, 33, 34]]
+            )
+            expected_batch = expected_single.unsqueeze(0).repeat(batch_size, 1, 1)
+            self.assertArrayEqual(u_interior.data, expected_batch)
+            self.assertEqual(u_interior.shape, (batch_size, 3, 4))
 
-    # Test subtraction with vectors of different lengths
-    with pytest.raises(ValueError):
-        _ = avec - bvec
+        with self.subTest("offset=(0.0, 0.5)"):
+            offset = (0.0, 0.5)
+            u = grids.GridVariable(data, offset, grid, bc)
+            u_interior = u.trim_boundary()
+            expected_single = torch.tensor(
+                [[21, 22, 23, 24, 25], [31, 32, 33, 34, 35], [41, 42, 43, 44, 45]]
+            )
+            expected_batch = expected_single.unsqueeze(0).repeat(batch_size, 1, 1)
+            self.assertArrayEqual(u_interior.data, expected_batch)
+            self.assertEqual(u_interior.shape, (batch_size, 3, 5))
 
+        with self.subTest("offset=(0.0, 0.0)"):
+            offset = (0.0, 0.0)
+            u = grids.GridVariable(data, offset, grid, bc)
+            u_interior = u.trim_boundary()
+            expected_single = torch.tensor(
+                [[22, 23, 24, 25], [32, 33, 34, 35], [42, 43, 44, 45]]
+            )
+            expected_batch = expected_single.unsqueeze(0).repeat(batch_size, 1, 1)
+            self.assertArrayEqual(u_interior.data, expected_batch)
+            self.assertEqual(u_interior.shape, (batch_size, 3, 4))
 
-def test_gridarrayvector_add_operations():
-    """Test addition operations (add, radd, iadd) for GridArrayVectors."""
-    grid = grids.Grid((3,))
+        with self.subTest("offset=(0.5, 0.0)"):
+            offset = (0.5, 0.0)
+            u = grids.GridVariable(data, offset, grid, bc)
+            u_interior = u.trim_boundary()
+            expected_single = torch.tensor(
+                [[12, 13, 14, 15], [22, 23, 24, 25], [32, 33, 34, 35], [42, 43, 44, 45]]
+            )
+            expected_batch = expected_single.unsqueeze(0).repeat(batch_size, 1, 1)
+            self.assertArrayEqual(u_interior.data, expected_batch)
+            self.assertEqual(u_interior.shape, (batch_size, 4, 4))
 
-    # Create GridArrays
-    a1 = grids.GridArray(torch.tensor([1.0, 2.0, 3.0]), offset=(0,), grid=grid)
-    a2 = grids.GridArray(torch.tensor([4.0, 5.0, 6.0]), offset=(0,), grid=grid)
+        # Test with non-edge offset - should be unchanged
+        with self.subTest("offset=(0.25, 0.75)"):
+            offset = (0.25, 0.75)
+            u = grids.GridVariable(data, offset, grid, bc)
+            u_interior = u.trim_boundary()
+            self.assertArrayEqual(u_interior.data, data)
+            self.assertEqual(u_interior.shape, (batch_size, 4, 5))
 
-    b1 = grids.GridArray(torch.tensor([2.0, 3.0, 4.0]), offset=(0,), grid=grid)
-    b2 = grids.GridArray(torch.tensor([5.0, 6.0, 7.0]), offset=(0,), grid=grid)
-
-    # Create GridArrayVectors
-    avec = grids.GridArrayVector([a1, a2])
-    bvec = grids.GridArrayVector([b1, b2])
-
-    # Test __add__
-    cvec = avec + bvec
-    assert isinstance(cvec, grids.GridArrayVector)
-    assert len(cvec) == 2
-    assert torch.allclose(cvec[0].data, torch.tensor([3.0, 5.0, 7.0]))
-    assert torch.allclose(cvec[1].data, torch.tensor([9.0, 11.0, 13.0]))
-
-    # Test __radd__ (should be the same as __add__ since it's commutative)
-    cvec_r = bvec + avec
-    assert isinstance(cvec_r, grids.GridArrayVector)
-    assert len(cvec_r) == 2
-    assert torch.allclose(cvec_r[0].data, torch.tensor([3.0, 5.0, 7.0]))
-    assert torch.allclose(cvec_r[1].data, torch.tensor([9.0, 11.0, 13.0]))
-
-    # Test __iadd__
-    avec_copy = grids.GridArrayVector([a1.clone(), a2.clone()])
-    avec_copy += bvec
-    assert isinstance(avec_copy, grids.GridArrayVector)
-    assert len(avec_copy) == 2
-    assert torch.allclose(avec_copy[0].data, torch.tensor([3.0, 5.0, 7.0]))
-    assert torch.allclose(avec_copy[1].data, torch.tensor([9.0, 11.0, 13.0]))
-
-
-def test_gridarrayvector_sub_operations():
-    """Test subtraction operations (sub, rsub, isub) for GridArrayVectors."""
-    grid = grids.Grid((3,))
-
-    # Create GridArrays
-    a1 = grids.GridArray(torch.tensor([1.0, 2.0, 3.0]), offset=(0,), grid=grid)
-    a2 = grids.GridArray(torch.tensor([4.0, 5.0, 6.0]), offset=(0,), grid=grid)
-
-    b1 = grids.GridArray(torch.tensor([2.0, 3.0, 4.0]), offset=(0,), grid=grid)
-    b2 = grids.GridArray(torch.tensor([5.0, 6.0, 7.0]), offset=(0,), grid=grid)
-
-    # Create GridArrayVectors
-    avec = grids.GridArrayVector([a1, a2])
-    bvec = grids.GridArrayVector([b1, b2])
-
-    # Test __sub__
-    cvec = avec - bvec
-    assert isinstance(cvec, grids.GridArrayVector)
-    assert len(cvec) == 2
-    assert torch.allclose(cvec[0].data, torch.tensor([-1.0, -1.0, -1.0]))
-    assert torch.allclose(cvec[1].data, torch.tensor([-1.0, -1.0, -1.0]))
-
-    # Test __rsub__
-    cvec_r = bvec - avec
-    assert isinstance(cvec_r, grids.GridArrayVector)
-    assert len(cvec_r) == 2
-    assert torch.allclose(cvec_r[0].data, torch.tensor([1.0, 1.0, 1.0]))
-    assert torch.allclose(cvec_r[1].data, torch.tensor([1.0, 1.0, 1.0]))
-
-    # Test __isub__
-    avec_copy = grids.GridArrayVector([a1.clone(), a2.clone()])
-    avec_copy -= bvec
-    assert isinstance(avec_copy, grids.GridArrayVector)
-    assert len(avec_copy) == 2
-    assert torch.allclose(avec_copy[0].data, torch.tensor([-1.0, -1.0, -1.0]))
-    assert torch.allclose(avec_copy[1].data, torch.tensor([-1.0, -1.0, -1.0]))
-
-
-def test_gridvariablevector_add_operations():
-    """Test addition operations (add, radd, iadd) for GridVariableVectors."""
-    grid = grids.Grid((3,))
-    bc = boundaries.HomogeneousBoundaryConditions(
-        ((boundaries.BCType.PERIODIC, boundaries.BCType.PERIODIC),)
+    @parameterized.parameters(
+        dict(
+            batch_size=2,
+            shape=(10,),
+            bc=boundaries.periodic_boundary_conditions(ndim=1),
+            padding=(1, 1),
+            dim=0,
+        ),
+        dict(
+            batch_size=3,
+            shape=(10, 10),
+            bc=boundaries.dirichlet_boundary_conditions(ndim=2),
+            padding=(2, 1),
+            dim=1,
+        ),
     )
+    def test_shift_pad_trim_batch(self, batch_size, shape, bc, padding, dim):
+        """Test shift, pad, and trim operations with batch dimensions."""
+        grid = grids.Grid(shape)
+        data = torch.randint(0, 10, (batch_size, *shape))
+        u = grids.GridVariable(data, (0.5,) * len(shape), grid, bc)
 
-    # Create GridArrays
-    a1_array = grids.GridArray(torch.tensor([1.0, 2.0, 3.0]), offset=(0,), grid=grid)
-    a2_array = grids.GridArray(torch.tensor([4.0, 5.0, 6.0]), offset=(0,), grid=grid)
+        with self.subTest("shift"):
+            shifted = u.shift(offset=1, dim=dim)
+            expected = bc.shift(u, 1, dim)
+            self.assertArrayEqual(shifted.data, expected.data)
+            self.assertEqual(shifted.shape, u.shape)
+            self.assertEqual(shifted.shape[0], batch_size)
 
-    b1_array = grids.GridArray(torch.tensor([2.0, 3.0, 4.0]), offset=(0,), grid=grid)
-    b2_array = grids.GridArray(torch.tensor([5.0, 6.0, 7.0]), offset=(0,), grid=grid)
+    def test_batch_consistency_across_boundary_operations(self):
+        """Test that boundary operations are consistent across batch elements."""
+        batch_size = 3
+        shape = (8, 8)
+        grid = grids.Grid(shape)
 
-    # Create GridVariables
-    a1 = grids.GridVariable(a1_array, bc)
-    a2 = grids.GridVariable(a2_array, bc)
-    b1 = grids.GridVariable(b1_array, bc)
-    b2 = grids.GridVariable(b2_array, bc)
+        # Create test data where each batch element is identical
+        single_data = torch.randint(0, 100, shape)
+        batched_data = single_data.unsqueeze(0).repeat(batch_size, 1, 1)
 
-    # Create GridVariableVectors
-    avec = grids.GridVariableVector([a1, a2])
-    bvec = grids.GridVariableVector([b1, b2])
+        bc = boundaries.dirichlet_boundary_conditions(ndim=2)
 
-    # Test __add__
-    cvec = avec + bvec
-    assert isinstance(cvec, grids.GridVariableVector)
-    assert len(cvec) == 2
-    assert torch.allclose(cvec[0].data, torch.tensor([3.0, 5.0, 7.0]))
-    assert torch.allclose(cvec[1].data, torch.tensor([9.0, 11.0, 13.0]))
+        u = grids.GridVariable(batched_data, (0.0, 0.0), grid, bc)
+        u_interior = u.trim_boundary()
 
-    # Test __radd__ (should be the same as __add__ since it's commutative)
-    cvec_r = bvec + avec
-    assert isinstance(cvec_r, grids.GridVariableVector)
-    assert len(cvec_r) == 2
-    assert torch.allclose(cvec_r[0].data, torch.tensor([3.0, 5.0, 7.0]))
-    assert torch.allclose(cvec_r[1].data, torch.tensor([9.0, 11.0, 13.0]))
+        # Each batch element should produce identical results
+        for i in range(1, batch_size):
+            self.assertArrayEqual(u_interior.data[0], u_interior.data[i])
 
-    # Test __iadd__ (since tuples are immutable, this creates a new object)
-    avec_copy = grids.GridVariableVector(
-        [
-            grids.GridVariable(a1.array.clone(), a1.bc),
-            grids.GridVariable(a2.array.clone(), a2.bc),
-        ]
+    def test_batch_different_data_per_element(self):
+        """Test boundary operations when each batch element has different data."""
+        batch_size = 2
+        shape = (6, 6)
+        grid = grids.Grid(shape)
+
+        # Create different data for each batch element
+        data = torch.randn((batch_size, *shape))
+
+        bc = boundaries.dirichlet_boundary_conditions(ndim=2)
+
+        u = grids.GridVariable(data, (0.0, 0.0), grid, bc)
+        # (0.0, 0.0) offset means we expect to trim one layer from only the left side even if the trim_boundary default is trimming both boundary
+        u_interior = u.trim_boundary()
+
+        # Check that each batch element is processed independently
+        self.assertEqual(
+            u_interior.shape, (batch_size, 5, 5)
+        )  # Trimmed from (6,6) to (5,5)
+
+        # Verify that batch elements are different (as expected)
+        self.assertFalse(torch.allclose(u_interior.data[0], u_interior.data[1]))
+
+
+class GridTest(test_utils.TestCase):
+
+    def test_constructor_and_attributes(self):
+        with self.subTest("1d"):
+            grid = grids.Grid((10,))
+            self.assertEqual(grid.shape, (10,))
+            self.assertEqual(grid.step, (1.0,))
+            self.assertEqual(grid.domain, ((0, 10.0),))
+            self.assertEqual(grid.ndim, 1)
+            self.assertEqual(grid.cell_center, (0.5,))
+            self.assertEqual(grid.cell_faces, ((1.0,),))
+
+        with self.subTest("1d domain scalar size"):
+            grid = grids.Grid((10,), domain=10)
+            self.assertEqual(grid.domain, ((0.0, 10.0),))
+
+        with self.subTest("2d"):
+            grid = grids.Grid(
+                (10, 10),
+                step=0.1,
+            )
+            self.assertEqual(grid.step, (0.1, 0.1))
+            self.assertEqual(grid.domain, ((0, 1.0), (0, 1.0)))
+            self.assertEqual(grid.ndim, 2)
+            self.assertEqual(grid.cell_center, (0.5, 0.5))
+            self.assertEqual(grid.cell_faces, ((1.0, 0.5), (0.5, 1.0)))
+
+        with self.subTest("1d domain"):
+            grid = grids.Grid((10,), domain=[(-2, 2)])
+            self.assertEqual(grid.step, (2 / 5,))
+            self.assertEqual(grid.domain, ((-2.0, 2.0),))
+            self.assertEqual(grid.ndim, 1)
+            self.assertEqual(grid.cell_center, (0.5,))
+            self.assertEqual(grid.cell_faces, ((1.0,),))
+
+        with self.subTest("2d domain"):
+            grid = grids.Grid((10, 20), domain=[(-2, 2), (0, 3)])
+            self.assertEqual(grid.step, (4 / 10, 3 / 20))
+            self.assertEqual(grid.domain, ((-2.0, 2.0), (0.0, 3.0)))
+            self.assertEqual(grid.ndim, 2)
+            self.assertEqual(grid.cell_center, (0.5, 0.5))
+            self.assertEqual(grid.cell_faces, ((1.0, 0.5), (0.5, 1.0)))
+
+        with self.subTest("2d periodic"):
+            grid = grids.Grid((10, 20), domain=2 * torch.pi)
+            self.assertEqual(grid.step, (2 * torch.pi / 10, 2 * torch.pi / 20))
+            self.assertEqual(grid.domain, ((0.0, 2 * torch.pi), (0.0, 2 * torch.pi)))
+            self.assertEqual(grid.ndim, 2)
+
+        with self.assertRaisesRegex(TypeError, "cannot provide both"):
+            grids.Grid((2,), step=(1.0,), domain=[(0, 2.0)])
+        with self.assertRaisesRegex(ValueError, "length of domain"):
+            grids.Grid((2, 3), domain=[(0, 1)])
+        with self.assertRaisesRegex(ValueError, "pairs of numbers"):
+            grids.Grid((2,), domain=[(0, 1, 2)])  # type: ignore
+        with self.assertRaisesRegex(ValueError, "length of step"):
+            grids.Grid((2, 3), step=(1.0,))
+
+    def test_stagger(self):
+        grid = grids.Grid((10, 10))
+        array_1 = torch.zeros((10, 10))
+        array_2 = torch.ones((10, 10))
+        u, v = grid.stagger((array_1, array_2))
+        self.assertEqual(u.offset, (1.0, 0.5))
+        self.assertEqual(v.offset, (0.5, 1.0))
+
+    def test_center(self):
+        grid = grids.Grid((10, 10))
+
+        with self.subTest("array ndim same as grid"):
+            array_1 = torch.zeros((10, 10))
+            array_2 = torch.zeros((20, 30))
+            v = (array_1, array_2)  # tuple is a simple pytree
+            v_centered = grid.center(v)
+            self.assertLen(v_centered, 2)
+            self.assertIsInstance(v_centered[0], grids.GridVariable)
+            self.assertIsInstance(v_centered[1], grids.GridVariable)
+            self.assertEqual(v_centered[0].shape, (10, 10))
+            self.assertEqual(v_centered[1].shape, (20, 30))
+            self.assertEqual(v_centered[0].offset, (0.5, 0.5))
+            self.assertEqual(v_centered[1].offset, (0.5, 0.5))
+
+        with self.subTest("array ndim different than grid"):
+            # Assigns offset dimension based on grid.ndim
+            array_1 = torch.zeros((10,))
+            array_2 = torch.ones((10, 10, 10))
+            v = (array_1, array_2)  # tuple is a simple pytree
+            v_centered = grid.center(v)
+            self.assertLen(v_centered, 2)
+            self.assertIsInstance(v_centered[0], grids.GridVariable)
+            self.assertIsInstance(v_centered[1], grids.GridVariable)
+            self.assertEqual(v_centered[0].shape, (10,))
+            self.assertEqual(v_centered[1].shape, (10, 10, 10))
+            self.assertEqual(v_centered[0].offset, (0.5, 0.5))
+            self.assertEqual(v_centered[1].offset, (0.5, 0.5))
+
+    def test_axes_and_mesh(self):
+        with self.subTest("1d"):
+            grid = grids.Grid((5,), step=0.1)
+            axes = grid.axes()
+            self.assertLen(axes, 1)
+            self.assertAllClose(axes[0], torch.tensor([0.05, 0.15, 0.25, 0.35, 0.45]))
+            mesh = grid.mesh()
+            self.assertLen(mesh, 1)
+            self.assertAllClose(axes[0], mesh[0])  # in 1d, mesh matches array
+
+        with self.subTest("1d with offset"):
+            grid = grids.Grid((5,), step=0.1)
+            axes = grid.axes(offset=(0,))
+            self.assertLen(axes, 1)
+            self.assertAllClose(axes[0], torch.tensor([0.0, 0.1, 0.2, 0.3, 0.4]))
+            mesh = grid.mesh(offset=(0,))
+            self.assertLen(mesh, 1)
+            self.assertAllClose(axes[0], mesh[0])  # in 1d, mesh matches array
+
+        with self.subTest("2d"):
+            grid = grids.Grid((4, 6), domain=[(-2, 2), (0, 3)])
+            axes = grid.axes()
+            self.assertLen(axes, 2)
+            self.assertAllClose(axes[0], torch.tensor([-1.5, -0.5, 0.5, 1.5]))
+            self.assertAllClose(
+                axes[1], torch.tensor([0.25, 0.75, 1.25, 1.75, 2.25, 2.75])
+            )
+            mesh = grid.mesh()
+            self.assertLen(mesh, 2)
+            self.assertEqual(mesh[0].shape, (4, 6))
+            self.assertEqual(mesh[1].shape, (4, 6))
+            self.assertAllClose(mesh[0][:, 0], axes[0])
+            self.assertAllClose(mesh[1][0, :], axes[1])
+
+        with self.subTest("2d with offset"):
+            grid = grids.Grid((4, 6), domain=[(-2, 2), (0, 3)])
+            axes = grid.axes(offset=(0, 1))
+            self.assertLen(axes, 2)
+            self.assertAllClose(axes[0], torch.tensor([-2.0, -1.0, 0.0, 1.0]))
+            self.assertAllClose(axes[1], torch.tensor([0.5, 1.0, 1.5, 2.0, 2.5, 3.0]))
+            mesh = grid.mesh(offset=(0, 1))
+            self.assertLen(mesh, 2)
+            self.assertEqual(mesh[0].shape, (4, 6))
+            self.assertEqual(mesh[1].shape, (4, 6))
+            self.assertAllClose(mesh[0][:, 0], axes[0])
+            self.assertAllClose(mesh[1][0, :], axes[1])
+
+    @parameterized.parameters(
+        dict(
+            shape=(10,),
+            fn=lambda x: 2 * torch.ones_like(x),
+            offset=None,
+            expected_array=2 * torch.ones((10,)),
+            expected_offset=(0.5,),
+        ),
+        dict(
+            shape=(10, 10),
+            fn=lambda x, y: torch.ones_like(x) + torch.ones_like(y),
+            offset=(1, 0.5),
+            expected_array=2 * torch.ones((10, 10)),
+            expected_offset=(1, 0.5),
+        ),
+        dict(
+            shape=(10, 10, 10),
+            fn=lambda x, y, z: torch.ones_like(z),
+            offset=None,
+            expected_array=torch.ones((10, 10, 10)),
+            expected_offset=(0.5, 0.5, 0.5),
+        ),
     )
-    avec_copy += bvec
-    assert isinstance(avec_copy, grids.GridVariableVector)
-    assert len(avec_copy) == 2
-    assert torch.allclose(avec_copy[0].data, torch.tensor([3.0, 5.0, 7.0]))
-    assert torch.allclose(avec_copy[1].data, torch.tensor([9.0, 11.0, 13.0]))
+    def test_eval_on_mesh_default_offset(
+        self, shape, fn, offset, expected_array, expected_offset
+    ):
+        grid = grids.Grid(shape, step=0.1)
+        expected = grids.GridVariable(expected_array, expected_offset, grid)
+        actual = grid.eval_on_mesh(fn, offset)
+        self.assertArrayEqual(expected, actual)
+
+    def test_spectral_axes(self):
+        length = 42.0
+        shape = (64,)
+        grid = grids.Grid(shape, domain=((0, length),))
+
+        (xs,) = grid.axes()
+        (fft_xs,) = grid.fft_axes()
+        fft_xs *= 2 * torch.pi  # convert ordinal to angular frequencies
+
+        # compare the derivative of the sine function (i.e. cosine) with its
+        # derivative computed in frequency-space. Note that this derivative involves
+        # the computed frequencies so it can serve as a test.
+        angular_freq = 2 * torch.pi / length
+        ys = torch.sin(angular_freq * xs)
+        expected = angular_freq * torch.cos(angular_freq * xs)
+        actual = torch.fft.ifft(1j * fft_xs * torch.fft.fft(ys)).real
+        self.assertAllClose(expected, actual, atol=1e-4, rtol=1e-8)
+
+    def test_real_spectral_axes_1d(self):
+        length = 42.0
+        shape = (64,)
+        grid = grids.Grid(shape, domain=((0, length),))
+
+        (xs,) = grid.axes()
+        (fft_xs,) = grid.rfft_mesh()
+        fft_xs *= 2 * torch.pi  # convert ordinal to angular frequencies
+
+        # compare the derivative of the sine function (i.e. cosine) with its
+        # derivative computed in frequency-space. Note that this derivative involves
+        # the computed frequencies so it can serve as a test.
+        angular_freq = 2 * torch.pi / length
+        ys = torch.sin(angular_freq * xs)
+        expected = angular_freq * torch.cos(angular_freq * xs)
+        actual = torch.fft.irfft(1j * fft_xs * torch.fft.rfft(ys))
+        self.assertAllClose(expected, actual, atol=1e-4, rtol=1e-8)
+
+    def test_real_spectral_axes_nd_shape(self):
+        dim = 3
+        grid_size = 64
+        shape = (grid_size,) * dim
+        fft_shape = shape[:-1] + (grid_size // 2 + 1,)
+        domain = ((0, 2 * torch.pi),) * dim
+        grid = grids.Grid(shape, domain=(domain))
+
+        xs1, xs2, xs3 = grid.rfft_mesh()
+        self.assertEqual(xs1.shape, fft_shape)
+        self.assertEqual(xs2.shape, fft_shape)
+        self.assertEqual(xs3.shape, fft_shape)
+
+    def test_domain_interior_masks(self):
+        with self.subTest("1d"):
+            grid = grids.Grid((5,))
+            expected = (torch.tensor([1, 1, 1, 1, 0], dtype=torch.float32),)
+            self.assertAllClose(expected, grids.domain_interior_masks(grid))
+
+        with self.subTest("2d"):
+            grid = grids.Grid((3, 3))
+            expected = (
+                torch.tensor([[1, 1, 1], [1, 1, 1], [0, 0, 0]], dtype=torch.float32),
+                torch.tensor([[1, 1, 0], [1, 1, 0], [1, 1, 0]], dtype=torch.float32),
+            )
+            self.assertAllClose(expected, grids.domain_interior_masks(grid))
 
 
-def test_gridvariablevector_sub_operations():
-    """Test subtraction operations (sub, rsub, isub) for GridVariableVectors."""
-    grid = grids.Grid((3,))
-    bc = boundaries.HomogeneousBoundaryConditions(
-        ((boundaries.BCType.PERIODIC, boundaries.BCType.PERIODIC),)
-    )
-
-    # Create GridArrays
-    a1_array = grids.GridArray(torch.tensor([1.0, 2.0, 3.0]), offset=(0,), grid=grid)
-    a2_array = grids.GridArray(torch.tensor([4.0, 5.0, 6.0]), offset=(0,), grid=grid)
-
-    b1_array = grids.GridArray(torch.tensor([2.0, 3.0, 4.0]), offset=(0,), grid=grid)
-    b2_array = grids.GridArray(torch.tensor([5.0, 6.0, 7.0]), offset=(0,), grid=grid)
-
-    # Create GridVariables
-    a1 = grids.GridVariable(a1_array, bc)
-    a2 = grids.GridVariable(a2_array, bc)
-    b1 = grids.GridVariable(b1_array, bc)
-    b2 = grids.GridVariable(b2_array, bc)
-
-    # Create GridVariableVectors
-    avec = grids.GridVariableVector([a1, a2])
-    bvec = grids.GridVariableVector([b1, b2])
-
-    # Test __sub__
-    cvec = avec - bvec
-    assert isinstance(cvec, grids.GridVariableVector)
-    assert len(cvec) == 2
-    assert torch.allclose(cvec[0].data, torch.tensor([-1.0, -1.0, -1.0]))
-    assert torch.allclose(cvec[1].data, torch.tensor([-1.0, -1.0, -1.0]))
-
-    # Test __rsub__ (b - a, opposite of a - b)
-    cvec_r = bvec - avec
-    assert isinstance(cvec_r, grids.GridVariableVector)
-    assert len(cvec_r) == 2
-    assert torch.allclose(cvec_r[0].data, torch.tensor([1.0, 1.0, 1.0]))
-    assert torch.allclose(cvec_r[1].data, torch.tensor([1.0, 1.0, 1.0]))
-
-    # Test __isub__ (since tuples are immutable, this creates a new object)
-    avec_copy = grids.GridVariableVector(
-        [
-            grids.GridVariable(a1.array.clone(), a1.bc),
-            grids.GridVariable(a2.array.clone(), a2.bc),
-        ]
-    )
-    avec_copy -= bvec
-    assert isinstance(avec_copy, grids.GridVariableVector)
-    assert len(avec_copy) == 2
-    assert torch.allclose(avec_copy[0].data, torch.tensor([-1.0, -1.0, -1.0]))
-    assert torch.allclose(avec_copy[1].data, torch.tensor([-1.0, -1.0, -1.0]))
-
-def test_gridarrayvector_mul_operations():
-    """Test multiplication operations (mul, rmul, imul) for GridArrayVectors."""
-    grid = grids.Grid((3,))
-
-    # Create GridArrays
-    a1 = grids.GridArray(torch.tensor([1.0, 2.0, 3.0]), offset=(0,), grid=grid)
-    a2 = grids.GridArray(torch.tensor([4.0, 5.0, 6.0]), offset=(0,), grid=grid)
-
-    # Create GridArrayVector
-    avec = grids.GridArrayVector([a1, a2])
-    
-    # Test scalar multiplication
-    # Test __mul__
-    scalar = 2.0
-    cvec = avec * scalar
-    assert isinstance(cvec, grids.GridArrayVector)
-    assert len(cvec) == 2
-    assert torch.allclose(cvec[0].data, torch.tensor([2.0, 4.0, 6.0]))
-    assert torch.allclose(cvec[1].data, torch.tensor([8.0, 10.0, 12.0]))
-
-    # Test __rmul__
-    cvec_r = scalar * avec
-    assert isinstance(cvec_r, grids.GridArrayVector)
-    assert len(cvec_r) == 2
-    assert torch.allclose(cvec_r[0].data, torch.tensor([2.0, 4.0, 6.0]))
-    assert torch.allclose(cvec_r[1].data, torch.tensor([8.0, 10.0, 12.0]))
-
-    # Test __imul__
-    avec_copy = grids.GridArrayVector([a1.clone(), a2.clone()])
-    avec_copy *= scalar
-    assert isinstance(avec_copy, grids.GridArrayVector)
-    assert len(avec_copy) == 2
-    assert torch.allclose(avec_copy[0].data, torch.tensor([2.0, 4.0, 6.0]))
-    assert torch.allclose(avec_copy[1].data, torch.tensor([8.0, 10.0, 12.0]))
-    
-    # Test tensor multiplication
-    tensor = torch.tensor(2.0)
-    tvec = avec * tensor
-    assert isinstance(tvec, grids.GridArrayVector)
-    assert torch.allclose(tvec[0].data, torch.tensor([2.0, 4.0, 6.0]))
-    assert torch.allclose(tvec[1].data, torch.tensor([8.0, 10.0, 12.0]))
-
-
-def test_gridarrayvector_div_operations():
-    """Test division operations (truediv, rtruediv, itruediv) for GridArrayVectors."""
-    grid = grids.Grid((3,))
-
-    # Create GridArrays
-    a1 = grids.GridArray(torch.tensor([2.0, 4.0, 6.0]), offset=(0,), grid=grid)
-    a2 = grids.GridArray(torch.tensor([8.0, 10.0, 12.0]), offset=(0,), grid=grid)
-
-    # Create GridArrayVector
-    avec = grids.GridArrayVector([a1, a2])
-    
-    # Test scalar division
-    # Test __truediv__
-    scalar = 2.0
-    cvec = avec / scalar
-    assert isinstance(cvec, grids.GridArrayVector)
-    assert len(cvec) == 2
-    assert torch.allclose(cvec[0].data, torch.tensor([1.0, 2.0, 3.0]))
-    assert torch.allclose(cvec[1].data, torch.tensor([4.0, 5.0, 6.0]))
-
-    # Test __rtruediv__ (scalar / vector elements)
-    # For rtruediv, we're testing 24.0 / vector elements
-    scalar = 24.0
-    cvec_r = scalar / avec
-    assert isinstance(cvec_r, grids.GridArrayVector)
-    assert len(cvec_r) == 2
-    assert torch.allclose(cvec_r[0].data, torch.tensor([12.0, 6.0, 4.0]))
-    assert torch.allclose(cvec_r[1].data, torch.tensor([3.0, 2.4, 2.0]))
-
-    # Test __itruediv__
-    avec_copy = grids.GridArrayVector([a1.clone(), a2.clone()])
-    avec_copy /= 2.0
-    assert isinstance(avec_copy, grids.GridArrayVector)
-    assert len(avec_copy) == 2
-    assert torch.allclose(avec_copy[0].data, torch.tensor([1.0, 2.0, 3.0]))
-    assert torch.allclose(avec_copy[1].data, torch.tensor([4.0, 5.0, 6.0]))
-    
-    # Test tensor division
-    tensor = torch.tensor(2.0)
-    tvec = avec / tensor
-    assert isinstance(tvec, grids.GridArrayVector)
-    assert torch.allclose(tvec[0].data, torch.tensor([1.0, 2.0, 3.0]))
-    assert torch.allclose(tvec[1].data, torch.tensor([4.0, 5.0, 6.0]))
-
-
-def test_gridvariablevector_mul_operations():
-    """Test multiplication operations (mul, rmul, imul) for GridVariableVectors."""
-    grid = grids.Grid((3,))
-    bc = boundaries.HomogeneousBoundaryConditions(
-        ((boundaries.BCType.PERIODIC, boundaries.BCType.PERIODIC),)
-    )
-
-    # Create GridArrays
-    a1_array = grids.GridArray(torch.tensor([1.0, 2.0, 3.0]), offset=(0,), grid=grid)
-    a2_array = grids.GridArray(torch.tensor([4.0, 5.0, 6.0]), offset=(0,), grid=grid)
-
-    # Create GridVariables
-    a1 = grids.GridVariable(a1_array, bc)
-    a2 = grids.GridVariable(a2_array, bc)
-
-    # Create GridVariableVector
-    avec = grids.GridVariableVector([a1, a2])
-    
-    # Test scalar multiplication
-    # Test __mul__
-    scalar = 2.0
-    cvec = avec * scalar
-    assert isinstance(cvec, grids.GridVariableVector)
-    assert len(cvec) == 2
-    assert torch.allclose(cvec[0].data, torch.tensor([2.0, 4.0, 6.0]))
-    assert torch.allclose(cvec[1].data, torch.tensor([8.0, 10.0, 12.0]))
-    assert cvec[0].bc == a1.bc  # Verify boundary conditions are preserved
-    assert cvec[1].bc == a2.bc
-
-    # Test __rmul__
-    cvec_r = scalar * avec
-    assert isinstance(cvec_r, grids.GridVariableVector)
-    assert len(cvec_r) == 2
-    assert torch.allclose(cvec_r[0].data, torch.tensor([2.0, 4.0, 6.0]))
-    assert torch.allclose(cvec_r[1].data, torch.tensor([8.0, 10.0, 12.0]))
-    assert cvec_r[0].bc == a1.bc
-    assert cvec_r[1].bc == a2.bc
-
-    # Test __imul__ (since tuples are immutable, this creates a new object)
-    avec_copy = grids.GridVariableVector([
-        grids.GridVariable(a1.array.clone(), a1.bc),
-        grids.GridVariable(a2.array.clone(), a2.bc),
-    ])
-    avec_copy *= scalar
-    assert isinstance(avec_copy, grids.GridVariableVector)
-    assert len(avec_copy) == 2
-    assert torch.allclose(avec_copy[0].data, torch.tensor([2.0, 4.0, 6.0]))
-    assert torch.allclose(avec_copy[1].data, torch.tensor([8.0, 10.0, 12.0]))
-    assert avec_copy[0].bc == a1.bc
-    assert avec_copy[1].bc == a2.bc
-    
-    # Test tensor multiplication
-    tensor = torch.tensor(2.0)
-    tvec = avec * tensor
-    assert isinstance(tvec, grids.GridVariableVector)
-    assert torch.allclose(tvec[0].data, torch.tensor([2.0, 4.0, 6.0]))
-    assert torch.allclose(tvec[1].data, torch.tensor([8.0, 10.0, 12.0]))
-
-
-def test_gridvariablevector_div_operations():
-    """Test division operations (truediv, rtruediv, itruediv) for GridVariableVectors."""
-    grid = grids.Grid((3,))
-    bc = boundaries.HomogeneousBoundaryConditions(
-        ((boundaries.BCType.PERIODIC, boundaries.BCType.PERIODIC),)
-    )
-
-    # Create GridArrays
-    a1_array = grids.GridArray(torch.tensor([2.0, 4.0, 6.0]), offset=(0,), grid=grid)
-    a2_array = grids.GridArray(torch.tensor([8.0, 10.0, 12.0]), offset=(0,), grid=grid)
-
-    # Create GridVariables
-    a1 = grids.GridVariable(a1_array, bc)
-    a2 = grids.GridVariable(a2_array, bc)
-
-    # Create GridVariableVector
-    avec = grids.GridVariableVector([a1, a2])
-    
-    # Test scalar division
-    # Test __truediv__
-    scalar = 2.0
-    cvec = avec / scalar
-    assert isinstance(cvec, grids.GridVariableVector)
-    assert len(cvec) == 2
-    assert torch.allclose(cvec[0].data, torch.tensor([1.0, 2.0, 3.0]))
-    assert torch.allclose(cvec[1].data, torch.tensor([4.0, 5.0, 6.0]))
-    assert cvec[0].bc == a1.bc
-    assert cvec[1].bc == a2.bc
-
-    # Test __rtruediv__ (scalar / vector elements)
-    # For rtruediv, we're testing 24.0 / vector elements
-    scalar = 24.0
-    cvec_r = scalar / avec
-    assert isinstance(cvec_r, grids.GridVariableVector)
-    assert len(cvec_r) == 2
-    assert torch.allclose(cvec_r[0].data, torch.tensor([12.0, 6.0, 4.0]))
-    assert torch.allclose(cvec_r[1].data, torch.tensor([3.0, 2.4, 2.0]))
-    assert cvec_r[0].bc == a1.bc
-    assert cvec_r[1].bc == a2.bc
-
-    # Test __itruediv__ (since tuples are immutable, this creates a new object)
-    avec_copy = grids.GridVariableVector([
-        grids.GridVariable(a1.array.clone(), a1.bc),
-        grids.GridVariable(a2.array.clone(), a2.bc),
-    ])
-    avec_copy /= 2.0
-    assert isinstance(avec_copy, grids.GridVariableVector)
-    assert len(avec_copy) == 2
-    assert torch.allclose(avec_copy[0].data, torch.tensor([1.0, 2.0, 3.0]))
-    assert torch.allclose(avec_copy[1].data, torch.tensor([4.0, 5.0, 6.0]))
-    assert avec_copy[0].bc == a1.bc
-    assert avec_copy[1].bc == a2.bc
-    
-    # Test tensor division
-    tensor = torch.tensor(2.0)
-    tvec = avec / tensor
-    assert isinstance(tvec, grids.GridVariableVector)
-    assert torch.allclose(tvec[0].data, torch.tensor([1.0, 2.0, 3.0]))
-    assert torch.allclose(tvec[1].data, torch.tensor([4.0, 5.0, 6.0]))
-
-def test_gridvariablevector_bc_consistency():
-    """Test error cases for GridVariableVector with mismatched boundary conditions."""
-    grid = grids.Grid((3,))
-
-    bc1 = boundaries.HomogeneousBoundaryConditions(
-        ((boundaries.BCType.PERIODIC, boundaries.BCType.PERIODIC),)
-    )
-    bc2 = boundaries.HomogeneousBoundaryConditions(
-        ((boundaries.BCType.DIRICHLET, boundaries.BCType.DIRICHLET),)
-    )
-
-    # Create GridArrays
-    a1_array = grids.GridArray(torch.tensor([1.0, 2.0, 3.0]), offset=(0,), grid=grid)
-    a2_array = grids.GridArray(torch.tensor([4.0, 5.0, 6.0]), offset=(0,), grid=grid)
-
-    # Create GridVariables with different boundary conditions
-    a1 = grids.GridVariable(a1_array, bc1)
-    a2 = grids.GridVariable(a2_array, bc1)
-    b1 = grids.GridVariable(a1_array, bc2)
-    b2 = grids.GridVariable(a2_array, bc2)
-
-    # Create GridVariableVectors
-    avec = grids.GridVariableVector([a1, a2])
-    bvec = grids.GridVariableVector([b1, b2])
-
-    # Test that operations between vectors with different BCs raise errors
-    with pytest.raises(ValueError):
-        _ = avec + bvec
-
-    with pytest.raises(ValueError):
-        _ = avec - bvec
+if __name__ == "__main__":
+    absltest.main()
