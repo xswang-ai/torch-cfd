@@ -17,7 +17,7 @@
 
 """Prepare initial conditions for simulations."""
 import math
-from typing import Callable, Optional, Sequence
+from typing import Callable, Optional, Sequence, Union
 
 import torch
 import torch.fft as fft
@@ -25,7 +25,6 @@ import torch.fft as fft
 from torch_cfd import grids, pressure, boundaries
 
 Grid = grids.Grid
-GridArray = grids.GridArray
 GridVariable = grids.GridVariable
 GridVariableVector = grids.GridVariableVector
 BoundaryConditions = grids.BoundaryConditions
@@ -40,7 +39,7 @@ def wrap_velocities(
     """Wrap velocity arrays for input into simulations."""
     device = grid.device if device is None else device
     return GridVariableVector(tuple(
-        GridVariable(GridArray(u.data, offset, grid).to(device), bc)
+        GridVariable(u, offset, grid, bc).to(device)
         for u, offset, bc in zip(v, grid.cell_faces, bcs)
     ))
 
@@ -53,7 +52,7 @@ def wrap_vorticity(
 ) -> GridVariable:
     """Wrap vorticity arrays for input into simulations."""
     device = grid.device if device is None else device
-    return GridVariable(GridArray(w, grid.cell_faces, grid).to(device), bc)
+    return GridVariable(w, grid.cell_faces, grid, bc).to(device)
 
 
 def _log_normal_density(k, mode: float, variance=0.25):
@@ -88,7 +87,7 @@ def _angular_frequency_magnitude(grid: grids.Grid) -> torch.Tensor:
 
 def spectral_filter(
     spectral_density: Callable[[torch.Tensor], torch.Tensor],
-    v: torch.Tensor,
+    v: Union[torch.Tensor, GridVariable],
     grid: Grid,
 ) -> torch.Tensor:
     """Filter a torch.Tensor with white noise to match a prescribed spectral density."""
@@ -113,9 +112,9 @@ def project_and_normalize(
     grid = grids.consistent_grid_arrays(*v)
     pressure_bc = boundaries.get_pressure_bc_from_velocity(v)
     projection = pressure.PressureProjection(grid, pressure_bc).to(v.device)
-    v = projection(v)
+    v, _ = projection(v)
     vmax = torch.linalg.norm(torch.stack([u.data for u in v]), dim=0).max()
-    v = GridVariableVector(tuple(GridVariable(maximum_velocity * u.array / vmax, u.bc) for u in v))
+    v = GridVariableVector(tuple(GridVariable(maximum_velocity * u.data / vmax, u.offset, u.grid, u.bc) for u in v))
     return v
 
 
@@ -125,7 +124,8 @@ def filtered_velocity_field(
     peak_wavenumber: float = 3,
     iterations: int = 3,
     random_state: int = 0,
-    device: torch.device = None,
+    batch_size: int = 1,
+    device: torch.device = torch.device("cpu"),
 ) -> GridVariableVector:
     """Create divergence-free velocity fields with appropriate spectral filtering.
 
@@ -146,31 +146,35 @@ def filtered_velocity_field(
     # divide by `k ** (ndim - 1)` to account for the volume of the
     # `ndim - 1`-sphere of values with wavenumber `k`.
     spectral_density = lambda k: _log_normal_density(k, peak_wavenumber) / k ** (grid.ndim - 1)
+    result = []
 
-    random_states = [random_state + i for i in range(grid.ndim)]
-    rng = torch.Generator(device=device)
-    velocity_components = []
-    boundary_conditions = []
-    for k in random_states:
-        rng.manual_seed(k)
-        noise = torch.randn(grid.shape, generator=rng, device=device)
-        velocity_components.append(spectral_filter(spectral_density, noise, grid))
-        boundary_conditions.append(boundaries.periodic_boundary_conditions(grid.ndim))
-    velocity = wrap_velocities(velocity_components, grid, boundary_conditions, device=device)
-
-    # Due to numerical precision issues, we repeatedly normalize and project the
-    # velocity field. This ensures that it is divergence-free and achieves the
-    # specified maximum velocity.
-    # velocity is ((n, n), (n, n)) GridVariableVector
-    for _ in range(iterations):
-        velocity = project_and_normalize(velocity, maximum_velocity)
-    return velocity
+    for k in range(batch_size):
+        random_states = [random_state + i + k*batch_size for i in range(grid.ndim)]
+        rng = torch.Generator(device=device)
+        velocity_components = []
+        boundary_conditions = []
+        for k in random_states:
+            rng.manual_seed(k)
+            noise = torch.randn(grid.shape, generator=rng, device=device)
+            velocity_components.append(spectral_filter(spectral_density, noise, grid))
+            boundary_conditions.append(boundaries.periodic_boundary_conditions(grid.ndim))
+        velocity = wrap_velocities(velocity_components, grid, boundary_conditions, device=device)    
+        for _ in range(iterations):
+            velocity = project_and_normalize(velocity, maximum_velocity)
+        result.append(velocity)
+        # Due to numerical precision issues, we repeatedly normalize and project the
+        # velocity field. This ensures that it is divergence-free and achieves the
+        # specified maximum velocity.
+        # velocity is ((n, n), (n, n)) GridVariableVector 
+    
+    return grids.stack_gridvariable_vectors(*result)
 
 
 def vorticity_field(
     grid: Grid,
     peak_wavenumber: float = 3,
     random_state: int = 0,
+    batch_size: int = 1,
 ) -> GridVariable:
     """Create vorticity field with a spectral filtering
     using the McWilliams power spectrum density function.
@@ -187,13 +191,18 @@ def vorticity_field(
     spectral_density = lambda k: McWilliams_density(k, peak_wavenumber)
 
     rng = torch.Generator()
-    rng.manual_seed(random_state)
-    noise = torch.randn(grid.shape, generator=rng)
-    k = _angular_frequency_magnitude(grid)
-    psi = spectral_filter(spectral_density, noise, grid)
-    psi = streamfunc_normalize(k, psi)
-    vorticity = fft.ifftn(fft.fftn(psi) * k**2).real
-    boundary_condition = boundaries.periodic_boundary_conditions(grid.ndim)
-    vorticity = wrap_vorticity(vorticity, grid, boundary_condition)
+    result = []
 
-    return vorticity
+    for k in range(batch_size):
+        random_state = random_state + k
+        rng.manual_seed(random_state)
+        noise = torch.randn(grid.shape, generator=rng)
+        k = _angular_frequency_magnitude(grid)
+        psi = spectral_filter(spectral_density, noise, grid)
+        psi = streamfunc_normalize(k, psi)
+        vorticity = fft.ifftn(fft.fftn(psi) * k**2).real
+        boundary_condition = boundaries.periodic_boundary_conditions(grid.ndim)
+        vorticity = wrap_vorticity(vorticity, grid, boundary_condition)
+        result.append(vorticity)
+
+    return grids.stack_gridvariables(*result)

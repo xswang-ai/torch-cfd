@@ -17,8 +17,8 @@
 
 """Functions for computing and applying pressure."""
 
-from functools import reduce
-from typing import Callable, List, Optional, Sequence, Tuple, Union
+from functools import reduce, partial
+from typing import List, Optional, Tuple, Union
 
 import torch
 import torch.fft as fft
@@ -30,27 +30,13 @@ from torch_cfd import (
     grids,
 )
 
-GridArray = grids.GridArray
-GridArrayVector = grids.GridArrayVector
 GridVariable = grids.GridVariable
 GridVariableVector = grids.GridVariableVector
 BoundaryConditions = grids.BoundaryConditions
 
-def _set_laplacian(module: nn.Module, grid: grids.Grid, bc: Sequence[BoundaryConditions]):
-    """Initialize the Laplacian operators."""
-    if module.laplacians is None:
-        laplacians = fdm.set_laplacian_matrix(grid, bc)
-        laplacians = torch.stack(laplacians, dim=0)
-        module.register_buffer("laplacians", laplacians, persistent=True)
-    else:
-        # Check if the provided laplacians are consistent with the grid
-        for laplacian in module.laplacians:
-            if laplacian.shape != grid.shape:
-                raise ValueError("Provided laplacians do not match the grid shape.")
-
-def _set_laplacian(module: nn.Module, laplacians: torch.Tensor, grid: grids.Grid, bc: Sequence[BoundaryConditions]):
+def _set_laplacian(module: nn.Module, laplacians: torch.Tensor, grid: grids.Grid, bc: BoundaryConditions):
         """
-        Initialize the Laplacian operators.
+        Initialize the 1D Laplacian operators with ndim
         Args:
             laplacians have the shape (ndim, n, n)
         """
@@ -69,11 +55,11 @@ class PressureProjection(nn.Module):
     def __init__(
         self,
         grid: grids.Grid,
-        bc: Sequence[BoundaryConditions],
+        bc: BoundaryConditions,
         dtype: Optional[torch.dtype] = torch.float32,
         implementation: Optional[str] = None,
         laplacians: Optional[torch.Tensor] = None,
-        initial_guess_pressure: Optional[GridArray] = None,
+        initial_guess_pressure: Optional[GridVariable] = None,
     ):
         """
         Args:
@@ -101,12 +87,12 @@ class PressureProjection(nn.Module):
             laplacians=self.laplacians
         )
         if initial_guess_pressure is None:
-            initial_guess_pressure = GridArray(
+            initial_guess_pressure = GridVariable(
                 torch.zeros(grid.shape), grid.cell_center, grid
             )
             self.q0 = bc.impose_bc(initial_guess_pressure)
 
-    def forward(self, v: GridVariableVector) -> GridVariableVector:
+    def forward(self, v: GridVariableVector) -> Tuple[GridVariableVector, GridVariable]:
         """Project velocity to be divergence-free."""
         _ = grids.consistent_grid(self.grid, *v)
         pressure_bc = boundaries.get_pressure_bc_from_velocity(v)
@@ -114,19 +100,18 @@ class PressureProjection(nn.Module):
         rhs = fdm.divergence(v)
         rhs_transformed = self.rhs_transform(rhs, pressure_bc)
         rhs_inv = self.solver(rhs_transformed)
-        q = GridArray(rhs_inv, rhs.offset, rhs.grid)
+        q = GridVariable(rhs_inv, rhs.offset, rhs.grid)
         q = pressure_bc.impose_bc(q)
         q_grad = fdm.forward_difference(q)
         v_projected = GridVariableVector(
             tuple(u.bc.impose_bc(u.array - q_g) for u, q_g in zip(v, q_grad))
         )
-        # assert v_projected.__len__() == v.__len__()
-        return v_projected
+        return v_projected, q
         
 
     @staticmethod
     def rhs_transform(
-        u: GridArray,
+        u: GridVariable,
         bc: BoundaryConditions,
     ) -> torch.Tensor:
         """Transform the RHS of pressure projection equation for stability."""
@@ -149,12 +134,19 @@ class PressureProjection(nn.Module):
                 u_data = u_data - mean
         return u_data
 
+    @property
+    def inverse(self) -> torch.Tensor:
+        return self.solver.inverse
+    
+    @property
+    def laplacians(self) -> torch.Tensor:
+        return self.solver.laplacians
 
 class Pseudoinverse(nn.Module):
     def __init__(
         self,
         grid: grids.Grid,
-        bc: Optional[Sequence[boundaries.BoundaryConditions]] = None,
+        bc: Optional[BoundaryConditions] = None,
         dtype: torch.dtype = torch.float32,
         hermitian: bool = True,
         circulant: bool = True,
@@ -244,19 +236,14 @@ class Pseudoinverse(nn.Module):
         self.bc = bc
 
         if self.bc is None:
-            self.bc = boundaries.HomogeneousBoundaryConditions(
-                (
-                    (boundaries.BCType.PERIODIC, boundaries.BCType.PERIODIC),
-                    (boundaries.BCType.PERIODIC, boundaries.BCType.PERIODIC),
-                )
-            )
+            self.bc = boundaries.periodic_boundary_conditions(ndim=grid.ndim)
 
         self.cutoff = cutoff or 10 * torch.finfo(dtype).eps
 
         self.hermitian = hermitian
         self.circulant = circulant
         self.implementation = implementation
-        _set_laplacian(self, laplacians, grid, bc)
+        _set_laplacian(self, laplacians, grid, self.bc)
 
 
         if implementation is None:
@@ -267,15 +254,15 @@ class Pseudoinverse(nn.Module):
             self.circulant = False
 
         if self.implementation == "rfft":
-            self.ifft = fft.irfftn
-            self.fft = fft.rfftn
+            self.ifft = partial(fft.irfftn, s=grid.shape)
+            self.fft = partial(fft.rfftn, dim=tuple(range(-grid.ndim, 0)))
         elif self.implementation == "fft":
-            self.ifft = fft.ifftn
-            self.fft = fft.fftn
+            self.ifft = partial(fft.ifftn, s=grid.shape)
+            self.fft = partial(fft.fftn, dim=tuple(range(-grid.ndim, 0)))
         if self.implementation not in ("fft", "rfft", "matmul"):
             raise NotImplementedError(f"Unsupported implementation: {implementation}")
 
-        self.eigenvalues = self._compute_eigenvalues()
+        self._compute_eigenvalues()
 
         if self.implementation in ("fft", "rfft"):
             if not self.circulant:
@@ -355,22 +342,21 @@ class Pseudoinverse(nn.Module):
         return torch.where(torch.abs(eigenvalues) > self.cutoff, 1 / eigenvalues, 0)
 
     def _apply_in_frequency_space(
-        self, value: torch.Tensor, multiplier: torch.Tensor
+        self, v: torch.Tensor, multiplier: torch.Tensor
     ) -> torch.Tensor:
         """
         Apply the inverse in frequency domain and return to real space.
         """
-
-        return self.ifft(multiplier * self.fft(value), s=self.grid.shape).real
+        return self.ifft(multiplier * self.fft(v)).real
 
     def _apply_in_svd_space(
-        self, value: torch.Tensor, multiplier: torch.Tensor
+        self, v: torch.Tensor, multiplier: torch.Tensor
     ) -> torch.Tensor:
         """
         Apply the inverse in SVD space and return to real space.
         """
         assert self.implementation == "matmul"
-        out = value
+        out = v
         for vectors in self.eigenvectors:
             out = torch.tensordot(out, vectors, dims=(0, 0))
         out *= multiplier
