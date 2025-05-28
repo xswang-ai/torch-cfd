@@ -8,10 +8,10 @@ This repository contains mainly two parts:
 
 ### Part I: a native PyTorch port of [Google's Computational Fluid Dynamics package in Jax](https://github.com/google/jax-cfd)
 The main changes are documented in the `README.md` under the [`torch_cfd` directory](./torch_cfd/). The most significant changes in all routines include:
-  - Routines that rely on the functional programming of Jax have been rewritten to be the PyTorch's tensor-in-tensor-out style, which is arguably more user-friendly to debugging as one can view immediate tensors using Data Wrangler in VS Code.
+  - Routines that rely on the functional programming of Jax have been rewritten to be the PyTorch's tensor-in-tensor-out style, which is arguably more user-friendly to debugging as one can view intermediate tensors in VS Code.
   - Functions and operators are in general implemented as `nn.Module` like a factory template.
   - Jax-cfd's `funcutils.trajectory` function supports tracking only one field variable (vorticity or velocity). For this port, extra fields computation and tracking are made more accessible, such as time derivatives $\partial_t\boldsymbol{v}$ and PDE residual $R(\boldsymbol{v}):=\boldsymbol{f}-\partial_t \boldsymbol{v}-(\boldsymbol{v}\cdot\nabla)\boldsymbol{v} + \nu \Delta \boldsymbol{v}$.
-  - All ops take into consideration the batch dimension of tensors `(b, *, n, m)` regardless of `*` dimension, for example, `(b, T, C, n, n)`, which is similar to PyTorch behavior, not a single trajectory like Google's original Jax-CFD package.
+  - All ops take into consideration the batch dimension of tensors `(b, *, n, m)` regardless of `*` dimension, for example, `(b, T, C, n, m)`, which is similar to PyTorch behavior, not a single trajectory like Google's original Jax-CFD package. The stencil operations generally starts from the last dimension, following `torch.nn.functional.pad`'s behavior.
 
 ### Part II: Spectral-Refiner: Neural Operator-Assisted Navier-Stokes Equations simulator.
   - The **Spatiotemporal Fourier Neural Operator** (SFNO) is a spacetime tensor-to-tensor learner (or trajectory-to-trajectory), available in the [`fno` directory](./fno). Different components of FNO have been re-implemented keeping the conciseness of the original implementation while allowing modern expansions. We draw inspiration from the [3D FNO in Nvidia's Neural Operator repo](https://github.com/neuraloperator/neuraloperator), [Transformers-based neural operators](https://github.com/thuml/Neural-Solver-Library), as well as Temam's book on functional analysis for the NSE. 
@@ -41,7 +41,7 @@ Data generation instructions are available in the [SFNO folder](./fno).
 
 ## Examples
 - Demos of different simulation setups:
-  - [2D simulation with a pseudo-spectral solver](./examples/Kolmogrov2d_rk4_cn_forced_turbulence.ipynb)
+  - [2D simulation with a pseudo-spectral solver](./examples/Kolmogrov2d_rk4_spectral_forced_turbulence.ipynb)
   - [2D simulation with a finite volume solver](./examples/Kolmogrov2d_rk4_fvm_forced_turbulence.ipynb)
 - Demos of Spatiotemporal FNO's training and evaluation using the neural operator-assisted fluid simulation pipelines
   - [Training of SFNO for only 15 epochs for the isotropic turbulence example](./examples/ex2_SFNO_train.ipynb)
@@ -78,6 +78,8 @@ If you like to use `torch-cfd` please use the following [paper](https://arxiv.or
 
 ## Acknowledgments
 I am grateful for the support from [Long Chen (UC Irvine)](https://github.com/lyc102/ifem) and 
-[Ludmil Zikatanov (Penn State)](https://github.com/HAZmathTeam/hazmath) over the years, and their efforts in open-sourcing scientific computing codes. I also appreciate the support from the National Science Foundation (NSF) to junior researchers. I also want to thank the free A6000 credits at the SSE ML cluster from the University of Missouri.
+[Ludmil Zikatanov (Penn State)](https://github.com/HAZmathTeam/hazmath) over the years, and their efforts in open-sourcing scientific computing codes. I also appreciate the support from the National Science Foundation (NSF) to junior researchers. I want to thank the free A6000 credits at the SSE ML cluster from the University of Missouri. 
+
+(Added after `0.2.0`) I also want to acknowledge that University of Missouri's OpenAI Enterprise API key. After from version `0.1.0`, I begin prompt existing codes in VSCode Copilot (using the OpenAI Enterprise API), which arguably significantly improve the efficiency on "porting->debugging->refactoring" cycle, e.g., Copilot helps design unittests and `.vscode/launch.json` for debugging. For details of how Copilot's suggestions on code refactoring, please see [README.md](./torch_cfd/README.md) in `torch_cfd` folder.
 
 For individual paper's acknowledgment please see [here](./fno/README.md).
