@@ -1,9 +1,6 @@
 name: Run Tests 🧪
 
 on:
-  push:
-    tags:
-      - '*'
   pull_request:
 
 jobs:
