@@ -1,4 +1,5 @@
 # Neural Operator-Assisted Computational Fluid Dynamics in PyTorch
+[![Python 3.10](https://img.shields.io/badge/python-3.10-blue.svg)](https://www.python.org/downloads/release/python-3100) ![CFD tests](https://github.com/scaomath/torch-cfd/actions/workflows/pytest.yml/badge.svg)
 
 ![A decaying turbulence (McWilliams 1984)](examples/McWilliams2d.svg)
 
@@ -8,10 +9,10 @@ This repository contains mainly two parts:
 
 ### Part I: a native PyTorch port of [Google's Computational Fluid Dynamics package in Jax](https://github.com/google/jax-cfd)
 The main changes are documented in the `README.md` under the [`torch_cfd` directory](./torch_cfd/). The most significant changes in all routines include:
-  - Routines that rely on the functional programming of Jax have been rewritten to be the PyTorch's tensor-in-tensor-out style, which is arguably more user-friendly to debugging as one can view intermediate tensors in VS Code.
+  - Routines that rely on the functional programming of Jax have been rewritten to be the PyTorch's tensor-in-tensor-out style, which is arguably more user-friendly to debugging as one can view intermediate tensors in VS Code debugger, set.
   - Functions and operators are in general implemented as `nn.Module` like a factory template.
-  - Jax-cfd's `funcutils.trajectory` function supports tracking only one field variable (vorticity or velocity). For this port, extra fields computation and tracking are made more accessible, such as time derivatives $\partial_t\boldsymbol{v}$ and PDE residual $R(\boldsymbol{v}):=\boldsymbol{f}-\partial_t \boldsymbol{v}-(\boldsymbol{v}\cdot\nabla)\boldsymbol{v} + \nu \Delta \boldsymbol{v}$.
-  - All ops take into consideration the batch dimension of tensors `(b, *, n, m)` regardless of `*` dimension, for example, `(b, T, C, n, m)`, which is similar to PyTorch behavior, not a single trajectory like Google's original Jax-CFD package. The stencil operations generally starts from the last dimension, following `torch.nn.functional.pad`'s behavior.
+  - Jax-cfd's `funcutils.trajectory` function supports tracking only one field variable (vorticity or velocity). For this port, extra fields computation and tracking are made more accessible, such as time derivatives $\partial_t\mathbf{u}_h$ and PDE residual $R(\mathbf{u}_h):=\mathbf{f}-\partial_t \mathbf{u}_h-(\mathbf{u}_h\cdot\nabla)\mathbf{u}_h + \nu \Delta \mathbf{u}_h$.
+  - All ops take into consideration the batch dimension of tensors `(b, *, n, m)` regardless of `*` dimension, for example, `(b, T, C, n, m)`, which is similar to PyTorch behavior. In Google Research's original Jax-CFD package, only a single trajectory is implemented. The stencil operations generally starts from the last dimension using negative indexing, following `torch.nn.functional.pad`'s behavior.
 
 ### Part II: Spectral-Refiner: Neural Operator-Assisted Navier-Stokes Equations simulator.
   - The **Spatiotemporal Fourier Neural Operator** (SFNO) is a spacetime tensor-to-tensor learner (or trajectory-to-trajectory), available in the [`fno` directory](./fno). Different components of FNO have been re-implemented keeping the conciseness of the original implementation while allowing modern expansions. We draw inspiration from the [3D FNO in Nvidia's Neural Operator repo](https://github.com/neuraloperator/neuraloperator), [Transformers-based neural operators](https://github.com/thuml/Neural-Solver-Library), as well as Temam's book on functional analysis for the NSE. 
@@ -27,7 +28,8 @@ To install `torch-cfd`'s current release, simply do:
 ```bash
 pip install torch-cfd
 ```
-If one wants to play with the neural operator part, it is recommended to clone this repo and play it locally by creating a venv using `requirements.txt`. Note: using PyTorch version >=2.0.0 is recommended for the broadcasting semantics.
+
+If one wants to play with the neural operator part, it is recommended to clone this repo and play it locally by creating a venv using [`requirements.txt`](./requirements.txt). Note: even you do not want to install dependencies, using PyTorch version >=2.0.0 is recommended for the broadcasting semantics.
 ```bash
 python3.11 -m venv venv
 source venv/bin/activate
