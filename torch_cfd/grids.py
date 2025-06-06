@@ -646,32 +646,32 @@ class GridVariable(GridTensorOpsMixin):
         grid = self.grid
         domain = list(grid.domain)
         shape = list(grid.shape)
-        for axis in range(self.grid.ndim):
+        for dim in range(self.grid.ndim):
             # nothing happens in periodic case
-            if self.bc.types[axis][1] == "periodic":
+            if self.bc.types[dim][1] == "periodic":
                 continue
             # nothing happens if the offset is not 0.0 or 1.0
             # this will automatically set the grid to interior.
-            if math.isclose(self.offset[axis], 1.0):
-                shape[axis] -= 1
-                domain[axis] = (domain[axis][0], domain[axis][1] - grid.step[axis])
-            elif math.isclose(self.offset[axis], 0.0):
-                shape[axis] -= 1
-                domain[axis] = (domain[axis][0] + grid.step[axis], domain[axis][1])
+            if math.isclose(self.offset[dim], 1.0):
+                shape[dim] -= 1
+                domain[dim] = (domain[dim][0], domain[dim][1] - grid.step[dim])
+            elif math.isclose(self.offset[dim], 0.0):
+                shape[dim] -= 1
+                domain[dim] = (domain[dim][0] + grid.step[dim], domain[dim][1])
         return Grid(shape, domain=tuple(domain))
 
     def _interior_array(self) -> torch.Tensor:
         """Returns only the interior points of self.data."""
         data = self.data
-        for axis in range(self.grid.ndim):
+        for dim in range(self.grid.ndim):
             # nothing happens in periodic case
-            if self.bc.types[axis][1] == "periodic":
+            if self.bc.types[dim][1] == "periodic":
                 continue
             # nothing happens if the offset is not 0.0 or 1.0
-            if math.isclose(self.offset[axis], 1.0):
-                data, _ = tensor_utils.split_along_axis(data, -1, axis)
-            elif math.isclose(self.offset[axis], 0.0):
-                _, data = tensor_utils.split_along_axis(data, 1, axis)
+            if math.isclose(self.offset[dim], 1.0):
+                data, _ = tensor_utils.split_along_axis(data, -1, dim)
+            elif math.isclose(self.offset[dim], 0.0):
+                _, data = tensor_utils.split_along_axis(data, 1, dim)
 
         return data
 
@@ -689,7 +689,10 @@ class GridVariable(GridTensorOpsMixin):
 
         In case of dirichlet with edge offset, the grid and array size is reduced,
         since one scalar lies exactly on the boundary. In all other cases,
-        self.grid and self.array are returned.
+        self.grid and self.data are returned.
+
+        Porting notes:
+        This method actually does not check whether the boundary conditions are imposed or not, is purely determined by the offset.
         """
         interior_array = self._interior_array()
         interior_grid = self._interior_grid()
@@ -703,22 +706,22 @@ class GridVariable(GridTensorOpsMixin):
         enforce_edge_bc() changes these boundary values to match the prescribed BC.
 
         Args:
-          *args: any optional values passed into BoundaryConditions values method.
+        *args: any optional values passed into BoundaryConditions values method.
         """
         if self.grid.shape != self.data.shape:
             raise ValueError("Stored array and grid have mismatched sizes.")
-        data = torch.as_tensor(self.data)
-        for axis in range(self.grid.ndim):
-            if "periodic" not in self.bc.types[axis]:
-                values = self.bc.values(axis, self.grid, *args)
+        data = torch.as_tensor(self.data).clone()  # Clone to avoid modifying original
+        for dim in range(self.grid.ndim):
+            if "periodic" not in self.bc.types[dim]:
+                values = self.bc.values(dim, self.grid, *args)
                 for boundary_side in range(2):
-                    if torch.isclose(self.offset[axis], boundary_side):
+                    if math.isclose(self.offset[dim], boundary_side):
                         # boundary data is set to match self.bc:
                         all_slice = [
                             slice(None, None, None),
                         ] * self.grid.ndim
-                        all_slice[axis] = -boundary_side
-                        data = data.at[tuple(all_slice)].set(values[boundary_side])
+                        all_slice[dim] = -boundary_side
+                        data[tuple(all_slice)] = values[boundary_side]
         return GridVariable(data, self.offset, self.grid, self.bc)
 
 
@@ -945,7 +948,7 @@ def pad(
         else:
             raise ValueError(
                 "expected the new offset to be an edge or cell center, got "
-                f"offset[axis]={u.offset[dim]}"
+                f"offset[dim]={u.offset[dim]}"
             )
     elif bc_type == BCType.NEUMANN:
         if not (
@@ -953,7 +956,7 @@ def pad(
         ):
             raise ValueError(
                 "expected offset to be an edge or cell center, got "
-                f"offset[axis]={u.offset[dim]}"
+                f"offset[dim]={u.offset[dim]}"
             )
         else:
             # When the data is cell-centered, computes the backward difference.
@@ -1127,61 +1130,6 @@ def _constant_pad_tensor(
             result = torch.cat([result, right_tensor], dim=dim_pad_tensor)
 
     return result
-
-
-# def _constant_pad(
-#     inputs: torch.Tensor,
-#     pad: Tuple[Tuple[int, int], ...],
-#     constant_values: Tuple[Tuple[float, float], ...],
-#     **kwargs,
-# ) -> torch.Tensor:
-#     """
-#     Corrected padding function that supports different constant values for each side.
-#     Pads each dimension from first to last as per the user input, mapping correctly to
-#     PyTorch's last-to-first padding order.
-#     inputs was unsqueezed at dim 0 as a batch_dim, so actual data dims are shifted by +1
-#     """
-#     ndim = inputs.ndim - 1 #
-#     original_shape = list(inputs.shape)
-#     out_shape = [1] + [original_shape[i+1] + pad[i][0] + pad[i][1] for i in range(ndim)] # inputs was unsqueezed at dim 0, so actual data dims are shifted by +1
-
-#     output = torch.empty(out_shape, dtype=inputs.dtype, device=inputs.device)
-
-#     def get_vals(dim):
-#         if len(constant_values) > dim:
-#             vals = constant_values[dim]
-#             if isinstance(vals, (tuple, list)) and len(vals) == 2:
-#                 return float(vals[0]), float(vals[1])
-#             else:
-#                 val = float(vals)
-#                 return val, val
-#         return 0.0, 0.0
-
-#     # Fill with zeros initially
-#     output.fill_(0.0)
-
-#     # Main region
-#     slices = (slice(None),) + tuple(slice(pad[i][0], pad[i][0] + original_shape[i+1]) for i in range(ndim))
-#     output[slices] = inputs
-
-#     # Apply left/right pad values per dim
-#     for i in range(ndim):
-#         lpad, rpad = pad[i]
-#         lval, rval = get_vals(i)
-
-#         if lpad > 0:
-#             left_slices = [slice(None)] * ndim
-#             left_slices[i] = slice(0, lpad)
-#             left_slides = (slice(None), ) + tuple(left_slices)
-#             output[left_slides] = lval
-
-#         if rpad > 0:
-#             right_slices = [slice(None)] * ndim
-#             right_slices[i] = slice(-rpad, None)
-#             right_slices = (slice(None), ) + tuple(right_slices)
-#             output[right_slices] = rval
-
-#     return output
 
 
 def averaged_offset(*offsets: List[Tuple[float, ...]]) -> Tuple[float, ...]:
