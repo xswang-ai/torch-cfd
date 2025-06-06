@@ -42,16 +42,21 @@ class Padding:
 class ConstantBoundaryConditions(grids.BoundaryConditions):
     """Boundary conditions for a PDE variable that are constant in space and time.
 
+    Attributes:
+        types: a tuple of tuples, where `types[i]` is a tuple specifying the lower and upper BC types for dimension `i`. The types can be one of the following:
+            BCType.PERIODIC, BCType.DIRICHLET, BCType.NEUMANN.
+        values: a tuple of tuples, where `values[i]` is a tuple specifying the lower and upper boundary values for dimension `i`. If None, the boundary condition is homogeneous (zero).
+
     Example usage:
       grid = Grid((10, 10))
       bc = ConstantBoundaryConditions(((BCType.PERIODIC, BCType.PERIODIC),
                                           (BCType.DIRICHLET, BCType.DIRICHLET)),
                                           ((0.0, 10.0),(1.0, 0.0)))
+      # in dimension 0 is periodic, (0, 10) on left and right (un-used)
+      # in dimension 1 is dirichlet, (1, 0) on bottom and top.
       v = GridVariable(torch.zeros((10, 10)), offset=(0.5, 0.5), grid, bc)
+      # v.offset is (0.5, 0.5) which is the cell center, so the boundary conditions have no effect in this case
 
-    Attributes:
-      types: `types[i]` is a tuple specifying the lower and upper BC types for
-        dimension `i`.
     """
 
     types: Tuple[Tuple[str, str], ...]
@@ -90,7 +95,7 @@ class ConstantBoundaryConditions(grids.BoundaryConditions):
         Neumann edge aligned boundary is not defined.
 
         Args:
-        u: torch.Tensor that should contain interior data
+        u: GridVariable that should contain interior data
         dim: axis along which to check
 
         Returns:
@@ -101,8 +106,11 @@ class ConstantBoundaryConditions(grids.BoundaryConditions):
             size_diff += 1
         if self.types[dim][1] == BCType.DIRICHLET and math.isclose(u.offset[dim], 1):
             size_diff += 1
-        if self.types[dim][0] == BCType.NEUMANN and math.isclose(u.offset[dim] % 1, 0):
-            raise NotImplementedError("Edge-aligned neumann BC are not implemented.")
+        if (self.types[dim][0] == BCType.NEUMANN and math.isclose(u.offset[dim], 1)) or (self.types[dim][1] == BCType.NEUMANN and math.isclose(u.offset[dim], 0)):
+            """
+            if lower (or left for dim 0) is Neumann, and the offset is 1 (the variable is on the right edge of a cell), the Neumann bc is not defined; vice versa for upper (or right for dim 0) Neumann bc with offset 0 (the variable is on the left edge of a cell).
+            """
+            raise ValueError("Variable not aligned with Neumann BC")
         if size_diff < 0:
             raise ValueError(
                 "the GridVariable does not contain all interior grid values."
@@ -124,11 +132,17 @@ class ConstantBoundaryConditions(grids.BoundaryConditions):
         """
         if None in self._values[dim]:
             return (None, None)
-        bc = tuple(
-            torch.full(grid.shape[:dim] + grid.shape[dim + 1 :], self._values[dim][-i])
-            for i in [0, 1]
-        )
-        return bc
+        
+        bc = []
+        for i in [0, 1]:
+            value = self._values[dim][-i]
+            if value is None:
+                bc.append(None)
+            else:
+                bc.append(torch.full(grid.shape[:dim] + grid.shape[dim + 1 :], value))
+        
+        return tuple(bc)
+        
 
     def _trim_padding(self, u: GridVariable, dim: int = -1, trim_side: str = "both"):
         """Trims padding from a GridVariable along axis and returns the array interior.
@@ -140,7 +154,7 @@ class ConstantBoundaryConditions(grids.BoundaryConditions):
             If 'left', the left side.
 
         Returns:
-        Trimmed array, shrunk along the indicated axis side.
+        Trimmed array, shrunk along the indicated axis side. bc is updated to None
         """
         positive_trim = 0
         negative_trim = 0
@@ -187,8 +201,8 @@ class ConstantBoundaryConditions(grids.BoundaryConditions):
     def trim_boundary(self, u: GridVariable) -> GridVariable:
         """Returns GridVariable without the grid points on the boundary.
 
-        Some grid points of GridVariable might coincide with boundary. This trims those
-        values. If the array was padded beforehand, removes the padding.
+        Some grid points of GridVariable might coincide with boundary. This trims those values. 
+        If the array was padded beforehand, removes the padding.
 
         Args:
         u: a `GridVariable` object.
@@ -196,10 +210,10 @@ class ConstantBoundaryConditions(grids.BoundaryConditions):
         Returns:
         A GridVariable shrunk along certain dimensions.
         """
-        for axis in range(-u.grid.ndim, 0):
-            _ = self._is_aligned(u, axis)
-            u, _ = self._trim_padding(u, axis)
-        return u
+        for dim in range(-u.grid.ndim, 0):
+            _ = self._is_aligned(u, dim)
+            u, _ = self._trim_padding(u, dim)
+        return GridVariable(u.data, u.offset, u.grid)
 
     def pad_and_impose_bc(
         self,
@@ -538,6 +552,7 @@ def get_advection_flux_bc_from_velocity_and_scalar_bc(
     flux_bc_values = []
 
     # Handle both homogeneous and non-homogeneous boundary conditions
+    # cannot handle mixed boundary conditions yet.
     if isinstance(u_bc, HomogeneousBoundaryConditions):
         u_values = tuple((0.0, 0.0) for _ in range(u_bc.ndim))
     elif isinstance(u_bc, ConstantBoundaryConditions):
@@ -557,7 +572,7 @@ def get_advection_flux_bc_from_velocity_and_scalar_bc(
         )
 
     for axis in range(c_bc.ndim):
-        if u_bc.types[axis][0] == "periodic":
+        if u_bc.types[axis][0] == BCType.PERIODIC:
             flux_bc_types.append((BCType.PERIODIC, BCType.PERIODIC))
             flux_bc_values.append((None, None))
         elif flux_direction != axis:
