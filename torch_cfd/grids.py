@@ -109,6 +109,21 @@ class Grid:
             device = torch.device("cpu")
         object.__setattr__(self, "device", device)
 
+    def __repr__(self) -> str:
+        lines = [f"Grid({self.ndim}D):"]
+        lines.append(f"  shape: {self.shape}")
+    
+        for i in range(self.ndim):
+            lower, upper = self.domain[i]
+            step = self.step[i]
+            lines.append(
+                f"  dim {i}: [{lower:.3f}, {upper:.3f}], step={step:.3f}, size={self.shape[i]}"
+            )
+
+        lines.append(f"  device: {self.device}")
+
+        return "\n".join(lines)
+
     @property
     def ndim(self) -> int:
         """Returns the number of dimensions of this grid."""
@@ -230,7 +245,14 @@ class BCType:
     PERIODIC = "periodic"
     DIRICHLET = "dirichlet"
     NEUMANN = "neumann"
+    ROBIN = "robin"
     NONE = None
+
+
+class Padding:
+    MIRROR = "reflect"
+    EXTEND = "replicate"
+    SYMMETRIC = "symmetric"
 
 
 @dataclasses.dataclass(init=False, frozen=True)
@@ -304,6 +326,22 @@ class BoundaryConditions:
         """Impose boundary conditions on the grid variable."""
         raise NotImplementedError(
             "impose_bc() not implemented in BoundaryConditions base class."
+        )
+    
+    def pad_and_impose_bc(
+        self,
+        u: GridVariable,
+        offset: Optional[Tuple[float, ...]] = None,
+    ) -> GridVariable:
+        """Pads the grid variable and imposes boundary conditions."""
+        raise NotImplementedError(
+            "pad_and_impose_bc() not implemented in BoundaryConditions base class."
+        )
+
+    def clone(self, *args, **kwargs) -> BoundaryConditions:
+        """Returns a clone of the boundary conditions."""
+        raise NotImplementedError(
+            "clone() not implemented in BoundaryConditions base class."
         )
 
 
@@ -495,6 +533,33 @@ class GridVariable(GridTensorOpsMixin):
                     f"{self.grid.ndim}, bc dimension = {len(self.bc.types)}"
                 )
 
+    def __repr__(self) -> str:
+        lines = [f"GridVariable:"]
+        lines.append(f"data tensor: \n{self.data.detach().numpy()}")
+        lines.append(f"data shape: {tuple(s for s in self.data.shape)}")
+        lines.append(f"offset: {self.offset}")
+        lines.append(f"grid shape: {self.grid.shape}")
+        # Add grid domain info
+        for i in range(self.grid.ndim):
+            lower, upper = self.grid.domain[i]
+            step = self.grid.step[i]
+            lines.append(f"  dim {i}: [{lower:.3f}, {upper:.3f}], step={step:.3f}")
+
+        lines.append(f"dtype : {self.data.dtype}")
+        lines.append(f"device: {self.device}")
+
+        # Add boundary condition info if available
+        if self.bc is not None:
+            bc_repr = repr(self.bc)
+            lines.append(f"boundary conditions:")
+            bc_lines = bc_repr.split("\n")
+            for bc_line in bc_lines:
+                lines.append(f"  {bc_line}")
+        else:
+            lines.append(f"boundary conditions: None")
+
+        return "\n".join(lines)
+
     @property
     def dtype(self):
         return self.data.dtype
@@ -508,13 +573,20 @@ class GridVariable(GridTensorOpsMixin):
         return self.data.ndim
 
     @property
-    def array(self) -> torch.Tensor:
-        """added for back-compatibility"""
-        return self.data
+    def array(self) -> GridVariable:
+        """Returns a GridVariable without boundary conditions
+        added for back-compatibility
+        The behavior of v.array is similar to Jax-CFD's GridArray
+        """
+        return GridVariable(self.data, self.offset, self.grid)
 
     @array.setter
-    def array(self, value: torch.Tensor):
-        self.data = value
+    def array(self, v: GridVariable):
+        """Sets data, offset, and grid from another GridVariable, ignoring its boundary conditions."""
+        self.data = v.data
+        self.offset = v.offset
+        self.grid = v.grid
+        self.bc = None  # reset boundary conditions
 
     @property
     def device(self) -> torch.device:
@@ -639,14 +711,19 @@ class GridVariable(GridTensorOpsMixin):
         )
 
     def trim_boundary(self) -> GridVariable:
-        return self.bc.trim_boundary(self)
+        """Returns a GridVariable with boundary conditions trimmed.
+        If the BC is None, nothing happens."""
+        return self.bc.trim_boundary(self) if self.bc is not None else self
 
     def _interior_grid(self) -> Grid:
         """Returns only the interior grid points."""
+        assert (
+            self.bc is not None
+        ), "Boundary conditions must be set to get interior grid."
         grid = self.grid
         domain = list(grid.domain)
         shape = list(grid.shape)
-        for dim in range(self.grid.ndim):
+        for dim in range(-self.grid.ndim, 0):
             # nothing happens in periodic case
             if self.bc.types[dim][1] == "periodic":
                 continue
@@ -662,6 +739,9 @@ class GridVariable(GridTensorOpsMixin):
 
     def _interior_array(self) -> torch.Tensor:
         """Returns only the interior points of self.data."""
+        assert (
+            self.bc is not None
+        ), "Boundary conditions must be set to get interior data."
         data = self.data
         for dim in range(self.grid.ndim):
             # nothing happens in periodic case
@@ -697,6 +777,16 @@ class GridVariable(GridTensorOpsMixin):
         interior_array = self._interior_array()
         interior_grid = self._interior_grid()
         return GridVariable(interior_array, self.offset, interior_grid)
+
+    def impose_bc(self) -> GridVariable:
+        """Returns the GridVariable with edge BC enforced, if applicable.
+
+        For GridVariables having nonperiodic BC and offset 0 or 1, there are values
+        in the array data that are dependent on the boundary condition.
+        impose_bc() changes these boundary values to match the prescribed BC.
+        """
+        assert self.bc is not None, "Boundary conditions must be set to impose BC."
+        return self.bc.impose_bc(self)
 
     def enforce_edge_bc(self, *args) -> GridVariable:
         """Returns the GridVariable with edge BC enforced, if applicable.
@@ -844,6 +934,21 @@ class GridVariableVector(GridVectorBase[GridVariable]):
         for v, value in zip(self, values):
             v.data = value
 
+    @property
+    def array(self) -> Tuple[GridVariable, ...]:
+        """Returns a tuple of GridVariables without boundary conditions."""
+        return tuple(v.array for v in self)
+
+    @array.setter
+    def array(self, values: Tuple[GridVariable, ...]):
+        """Sets data, offset, and grid from another GridVariableVector, ignoring its boundary conditions."""
+        if len(values) != len(self):
+            raise ValueError(
+                f"Cannot set array with different length: {len(values)} vs {len(self)}"
+            )
+        for v, value in zip(self, values):
+            v.array = value
+
 
 class GridTensor(torch.Tensor):
     """An array of GridArrays, representing a physical tensor field.
@@ -892,7 +997,13 @@ def shift(
 
 
 def pad(
-    u: GridVariable, width: int, dim: int, bc: Optional[BoundaryConditions] = None
+    u: GridVariable,
+    width: Union[Tuple[int, int], int],
+    dim: int,
+    bc: Optional[BoundaryConditions] = None,
+    mode: Optional[str] = Padding.EXTEND,
+    bc_types: Optional[Tuple[str, str]] = None,
+    values: Optional[Union[float, torch.Tensor]] = None,
 ) -> GridVariable:
     """Pad a GridVariable by `padding`.
 
@@ -904,6 +1015,10 @@ def pad(
         width: number of elements to pad along axis. Use negative value for lower
             boundary or positive value for upper boundary.
         dim: axis to pad along.
+        bc: boundary conditions to use for padding. If None, uses the boundary conditions of u.
+        bc_types: boundary condition types for the dimension `dim`. If None, uses the boundary conditions of u.
+        mode: padding mode for Ghost cells! The function tries to automatically select the mode based on the boundary conditions.
+        values: (TODO) allowing tensorial values to be passed for future development, currently used for a fallback implementation of Dirichlet BC.
 
     Returns:
         Padded array, elongated along the indicated axis.
@@ -912,15 +1027,31 @@ def pad(
         - the padding can be only defined when there is proper BC given. If bc is externally given (such as those cases in boundaryies.py), it will override the one in u.bc (if it is not None).
         - In the original Jax-CFD codes, when the width > 1, the code raises error "Padding past 1 ghost cell is not defined in nonperiodic case.", this is now removed and tested for correctness.
     """
-    assert not (u.bc is None and bc is None), "Both u.bc and bc cannot be None"
+    assert not (
+        u.bc is None and bc is None and bc_types is None
+    ), "u.bc, bc, and bc_types cannot be None at the same time"
+    assert mode in [Padding.MIRROR, Padding.EXTEND, Padding.SYMMETRIC], (
+    f"Padding mode must be one of ['{Padding.MIRROR}', '{Padding.EXTEND}', '{Padding.SYMMETRIC}'], got '{mode}'"
+)
     bc = bc if bc is not None else u.bc
-
-    if width < 0:  # pad lower boundary
-        bc_type = bc.types[dim][0]
-        padding = (-width, 0)
-    else:  # pad upper boundary
-        bc_type = bc.types[dim][1]
-        padding = (0, width)
+    bc_types = bc.types[dim] if bc_types is None else bc_types
+    values = bc.bc_values if values is None else values
+    if isinstance(width, int):
+        if width < 0:  # pad lower boundary
+            bc_type = bc_types[0]
+            padding = (-width, 0)
+        else:  # pad upper boundary
+            bc_type = bc_types[1]
+            padding = (0, width)
+    else:
+        # when passing width as a tuple
+        # the sign choices of the original Jax-CFD is kinda confusing
+        # as one is not suppose to pass negative values for lower boundary
+        assert width[0] >= 0 and width[1] >= 0, (
+            "when passing the padding as a tuple, widths must be non-negative integers, "
+            f"got {width} for dim={dim}"
+        )
+        padding = width
 
     full_padding = [(0, 0)] * u.grid.ndim
     full_padding[dim] = padding
@@ -928,27 +1059,89 @@ def pad(
     new_offset = list(u.offset)
     new_offset[dim] -= padding[0]
 
+    if bc_types[0] != bc_types[1]:
+        # a fallback implementation for when the boundary conditions are different
+        _bc_types = (bc_types[0], bc_types[0])
+        u = pad(u, -padding[0], dim, bc_types=_bc_types, values=values)
+        _bc_types = (bc_types[1], bc_types[1])
+        u = pad(u, padding[1], dim, bc_types=_bc_types, values=values)
+        return u
+    else:
+        bc_type = bc_types[0]
+
     if bc_type == BCType.PERIODIC:
         # self.values are ignored here
         data = expand_dims_pad(u.data, full_padding, mode="circular")
         return GridVariable(data, tuple(new_offset), u.grid, bc)
     elif bc_type == BCType.DIRICHLET:
+        # adding ghost cells in reality assumes that the padded dims are
+        # the SAME on both sides (even though implementation supports and
+        # yields correct results for asymmetric padding).
+        # for example, if one side is using symmetric padding when computing
+        # the ghost cell values, the other side should also use symmetric padding.
         if math.isclose(u.offset[dim] % 1, 0.5):  # cell center
             # make the linearly interpolated value equal to the boundary by setting
             # the padded values to the negative symmetric values
+            if any(p > 1 for p in padding):
+                mode = Padding.SYMMETRIC
             data = 2 * expand_dims_pad(
-                u.data, full_padding, mode="constant", constant_values=bc._values
-            ) - expand_dims_pad(u.data, full_padding, mode="replicate")
+                u.data, full_padding, mode="constant", constant_values=values
+            ) - expand_dims_pad(u.data, full_padding, mode=mode)
             return GridVariable(data, tuple(new_offset), u.grid, bc)
         elif math.isclose(u.offset[dim] % 1, 0):  # cell edge
-            data = expand_dims_pad(
-                u.data, full_padding, mode="constant", constant_values=bc._values
-            )
-            return GridVariable(data, tuple(new_offset), u.grid, bc)
+            # First the value on
+            # the boundary needs to be added to the array, if not specified by the interior CV values.
+            # Then the mirrored ghost cells need to be appended.
+
+            # if only one value is needed, no mode is necessary.
+            if math.isclose(sum(full_padding[dim]), 1) or math.isclose(
+                sum(full_padding[dim]), 0
+            ):
+                data = expand_dims_pad(
+                    u.data, full_padding, mode="constant", constant_values=values
+                )
+                return GridVariable(data, tuple(new_offset), u.grid, bc)
+            elif sum(full_padding[dim]) > 1:
+                if mode == Padding.EXTEND:
+                    data = expand_dims_pad(
+                        u.data,
+                        full_padding,
+                        mode="constant",
+                        constant_values=values,
+                    )
+                    return GridVariable(data, tuple(new_offset), u.grid, bc)
+                elif mode == Padding.MIRROR:
+                    bc_padding = [(0, 0)] * u.grid.ndim
+                    bc_padding[dim] = tuple(
+                        1 if pad > 0 else 0 for pad in padding
+                    )
+                    # subtract the padded cell
+                    full_padding_past_bc = [(0, 0)] * u.grid.ndim
+                    full_padding_past_bc[dim] = tuple(
+                        pad - 1 if pad > 0 else 0 for pad in padding
+                    )
+                    # here we are adding 0 boundary cell with 0 value
+                    expanded_data = expand_dims_pad(
+                        u.data, bc_padding, mode="constant", constant_values=(0, 0)
+                    )
+                    padding_values = list(values)
+                    padding_values[dim] = tuple([pad / 2 for pad in padding_values[dim]])
+                    data = 2 * expand_dims_pad(
+                        u.data,
+                        full_padding,
+                        mode="constant",
+                        constant_values=padding_values,
+                    ) - expand_dims_pad(expanded_data, full_padding_past_bc, mode="reflect")
+                return GridVariable(data, tuple(new_offset), u.grid, bc)
+            else:
+                raise ValueError(
+                    f"invalid padding width for Dirichlet BC, expected padding[dim={dim}] to have sum >= 0, got {padding[dim]}"
+                )
+
         else:
             raise ValueError(
                 "expected the new offset to be an edge or cell center, got "
-                f"offset[dim]={u.offset[dim]}"
+                f"offset[dim={dim}]={u.offset[dim]}"
             )
     elif bc_type == BCType.NEUMANN:
         if not (
@@ -956,7 +1149,7 @@ def pad(
         ):
             raise ValueError(
                 "expected offset to be an edge or cell center, got "
-                f"offset[dim]={u.offset[dim]}"
+                f"offset[dim={dim}]={u.offset[dim]}"
             )
         else:
             # When the data is cell-centered, computes the backward difference.
@@ -970,7 +1163,7 @@ def pad(
                     u.data,
                     full_padding,
                     mode="constant",
-                    constant_values=bc._values,
+                    constant_values=values,
                 )
                 - expand_dims_pad(u.data, full_padding, mode="constant")
             )
@@ -1010,7 +1203,7 @@ def expand_dims_pad(
     inputs: torch.Tensor,
     pad: Sequence[Tuple[int, int]],
     mode: str = "constant",
-    constant_values: float = 0,
+    constant_values: Union[float, Tuple[float, float], Sequence[Tuple[float, float]]] = 0,
     **kwargs,
 ) -> torch.Tensor:
     """
@@ -1045,7 +1238,7 @@ def expand_dims_pad(
         if isinstance(constant_values, (int, float)):
             array = F.pad(inputs, flat_pad, mode=mode, value=constant_values)
         elif isinstance(constant_values, (tuple, list)):
-            array = _constant_pad_tensor(inputs, pad, constant_values, **kwargs)
+            array = _constant_pad_tensor(inputs, pad, constant_values)
         else:
             raise NotImplementedError(
                 f"constant_values must be a float or a tuple/list, got {type(constant_values)}"
@@ -1053,6 +1246,9 @@ def expand_dims_pad(
     elif mode in ["circular", "reflect", "replicate"]:
         # periodic boundary condition
         array = F.pad(inputs, flat_pad, mode=mode)
+    elif mode == "symmetric":
+        # symmetric padding, mirrors values at the boundaries
+        array = _symmetric_pad_tensor(inputs, pad)
     else:
         raise NotImplementedError(f"invalid mode {mode} for torch.nn.functional.pad")
 
@@ -1061,8 +1257,8 @@ def expand_dims_pad(
 
 def _constant_pad_tensor(
     inputs: torch.Tensor,
-    pad: Tuple[Tuple[int, int], ...],
-    constant_values: Tuple[Tuple[float, float], ...],
+    pad: Sequence[Tuple[int, int]],
+    constant_values: Sequence[Tuple[float, float]],
     **kwargs,
 ) -> torch.Tensor:
     """
@@ -1073,17 +1269,25 @@ def _constant_pad_tensor(
         inputs: torch.Tensor to pad.
         pad: padding width for each dimension, e.g. ((2, 2), (1, 1)) for 2D tensor. (2, 2) means padding the first dimension by 2 on both sides, and (1, 1) means padding the second dimension by 1 on both sides.
         constant_values: constant values to pad with for each dimension, e.g. ((0, 0), (1, 1)).
+
+    Example:
+    If ((2, 2), (1, 1)) is given for a 2D (potentially batched) tensor of shape (*, 10, 20),
+        - pad[1] corresponds to the padding of the last dimension (20),
+        - pad[0] corresponds to the padding of the second-to-last dimension (10).
+        - the resulting tensor shape will be (*, 10 + 2 + 2, 20 + 1 + 1) = (*, 14, 22)
+
+        >>> data = torch.tensor([[11., 12., 13., 14.]])
+        >>> _constant_pad_tensor(data, ((2, 1),), ((0, 1),))
+        tensor([[0., 0., 11., 12., 13., 14., 1.],])
+
     """
     # inputs was unsqueezed at dim 0, so actual data dims are shifted by +1
-    ndim = len(pad)  # number of dimensions to pad
+    dims_to_pad = len(pad)  # number of dimensions to pad
     result = inputs
 
-    for i in reversed(range(ndim)):
-        dim_pad_tensor = i - ndim
+    for i in reversed(range(dims_to_pad)):
+        dim = i - dims_to_pad
         # correct mapping from pad index to tensor dim
-        # for example, if ((2, 2), (1, 1)) is given for a 2D tensor of shape (10, 20),
-        # the pad[1] corresponds to the padding of the last dimension (20),
-        # and pad[0] corresponds to the padding of the second-to-last dimension (10).
 
         left_pad, right_pad = pad[i]
 
@@ -1116,18 +1320,78 @@ def _constant_pad_tensor(
         shape = list(result.shape)
 
         if left_pad > 0:
-            shape[dim_pad_tensor] = left_pad
+            shape[dim] = left_pad
             left_tensor = torch.full(
                 shape, left_val, dtype=result.dtype, device=result.device
             )
-            result = torch.cat([left_tensor, result], dim=dim_pad_tensor)
+            result = torch.cat([left_tensor, result], dim=dim)
 
         if right_pad > 0:
-            shape[dim_pad_tensor] = right_pad
+            shape[dim] = right_pad
             right_tensor = torch.full(
                 shape, right_val, dtype=result.dtype, device=result.device
             )
-            result = torch.cat([result, right_tensor], dim=dim_pad_tensor)
+            result = torch.cat([result, right_tensor], dim=dim)
+
+    return result
+
+
+def _symmetric_pad_tensor(
+    inputs: torch.Tensor,
+    pad: Sequence[Tuple[int, int]],
+    **kwargs,
+) -> torch.Tensor:
+    """
+    Symmetric padding function that mirrors values at the boundaries.
+    Pads each dimension from first to last as per the user input.
+
+    Args:
+        inputs: torch.Tensor to pad.
+        pad: padding width for each dimension, e.g. ((2, 2), (1, 1)) for 2D tensor.
+             (2, 2) means padding the first dimension by 2 on both sides,
+             and (1, 1) means padding the second dimension by 1 on both sides.
+
+    Example:
+    If ((2, 2), (1, 1)) is given for a 2D (potentially batched) tensor of shape (*, 10, 20),
+        - pad[1] corresponds to the padding of the last dimension (20),
+        - pad[0] corresponds to the padding of the second-to-last dimension (10).
+        - the resulting tensor shape will be (*, 10 + 2 + 2, 20 + 1 + 1) = (*, 14, 22)
+
+        >>> data = torch.tensor([[11., 12., 13., 14.]])
+        >>> _symmetric_pad_tensor(data, ((2, 0),))
+        tensor([[12., 11., 11., 12., 13., 14.],])
+
+    """
+    dims_to_pad = len(pad)  # number of dimensions to pad
+    result = inputs
+
+    for i in reversed(range(dims_to_pad)):
+        dim = i - dims_to_pad
+        # correct mapping from pad index to tensor dim
+
+        left_pad, right_pad = pad[i]
+
+        if left_pad == 0 and right_pad == 0:
+            continue
+
+        n = result.shape[dim]
+        assert (
+            left_pad <= n and right_pad <= n
+        ), f"padding must be <= than existing size in dimension (got {left_pad},{right_pad} for size {n})"
+
+        # Get left padding values (mirror from beginning)
+        if left_pad > 0:
+            # flip the first left_pad elements in the to-be-padded dimension
+            left_tensor = result.narrow(dim, 0, left_pad).flip(dims=[dim])
+            result = torch.cat([left_tensor, result], dim=dim)
+
+        # Get right padding values (mirror from end)
+        if right_pad > 0:
+            # flip the last right_pad elements in the to-be-padded dimension
+            right_tensor = result.narrow(
+                dim, result.shape[dim] - right_pad, right_pad
+            ).flip(dims=[dim])
+            result = torch.cat([result, right_tensor], dim=dim)
 
     return result
 

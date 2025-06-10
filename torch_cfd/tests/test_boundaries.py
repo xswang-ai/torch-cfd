@@ -368,7 +368,7 @@ class ConstantBoundaryConditionsTest(test_utils.TestCase):
             expected_data=tensor([11, 12, 13, 14, 16]),
             expected_offset=(0.5,),
         ),
-        # Dirichlet / Neumann BC
+        # Dirichlet / Neumann BC, best test: test_pad_1d_inhomogeneous6
         dict(
             bc_types=(((BCType.DIRICHLET, BCType.NEUMANN),), ((1.0, 2.0),)),
             input_data=tensor([11, 12, 13, 14]),
@@ -654,7 +654,7 @@ class BoundaryConditionsImposingTest(test_utils.TestCase):
             input_data=tensor([12, 13, 14]),
             input_offset=(1,),
             grid_size=4,
-            expected_data=tensor([1, 12, 13, 14]),
+            expected_data=tensor([1, 12, 13, 14, 2]),
             expected_offset=(0,),
         ),
         dict(
@@ -662,16 +662,16 @@ class BoundaryConditionsImposingTest(test_utils.TestCase):
             input_data=tensor([11, 12, 13, 14]),
             input_offset=(1,),
             grid_size=5,
-            expected_data=tensor([11, 12, 13, 14, 2]),
-            expected_offset=(1,),
+            expected_data=tensor([1, 11, 12, 13, 14, 2]),
+            expected_offset=(0,),
         ),
         dict(
             bc_types=(((BCType.DIRICHLET, BCType.DIRICHLET),), ((1.0, 2.0),)),
             input_data=tensor([11, 12, 13, 14]),
             input_offset=(0.5,),
             grid_size=4,
-            expected_data=tensor([11, 12, 13, 14]),
-            expected_offset=(0.5,),
+            expected_data=tensor([-9, 11, 12, 13, 14, -10]),
+            expected_offset=(-0.5,),
         ),
         # Neumann BC
         dict(
@@ -679,8 +679,8 @@ class BoundaryConditionsImposingTest(test_utils.TestCase):
             input_data=tensor([11, 12, 13, 14]),
             input_offset=(0.5,),
             grid_size=4,
-            expected_data=tensor([11, 12, 13, 14]),
-            expected_offset=(0.5,),
+            expected_data=tensor([12, 11, 12, 13, 14, 16]),
+            expected_offset=(-0.5,),
         ),
         # Periodic BC
         dict(
@@ -715,7 +715,7 @@ class BoundaryConditionsImposingTest(test_utils.TestCase):
             input_offset=(0,),
             grid_size=4,
             bc_types=(((BCType.DIRICHLET, BCType.DIRICHLET),), ((1.0, 2.0),)),
-            expected_data=tensor([1, 12, 13, 14]),
+            expected_data=tensor([1, 12, 13, 14, 2]),
             expected_offset=(0,),
         ),
         dict(
@@ -723,16 +723,16 @@ class BoundaryConditionsImposingTest(test_utils.TestCase):
             input_offset=(1,),
             grid_size=5,
             bc_types=(((BCType.DIRICHLET, BCType.DIRICHLET),), ((1.0, 2.0),)),
-            expected_data=tensor([11, 12, 13, 14, 2]),
-            expected_offset=(1,),
+            expected_data=tensor([1, 11, 12, 13, 14, 2]),
+            expected_offset=(0,),
         ),
         dict(
             input_data=tensor([11, 12, 13, 14]),
             input_offset=(0.5,),
             grid_size=4,
             bc_types=(((BCType.DIRICHLET, BCType.DIRICHLET),), ((1.0, 2.0),)),
-            expected_data=tensor([11, 12, 13, 14]),
-            expected_offset=(0.5,),
+            expected_data=tensor([-9, 11, 12, 13, 14, -10]),
+            expected_offset=(-0.5,),
         ),
         # Neumann BC
         dict(
@@ -740,8 +740,8 @@ class BoundaryConditionsImposingTest(test_utils.TestCase):
             input_offset=(0.5,),
             grid_size=4,
             bc_types=(((BCType.NEUMANN, BCType.NEUMANN),), ((1.0, 2.0),)),
-            expected_data=tensor([11, 12, 13, 14]),
-            expected_offset=(0.5,),
+            expected_data=tensor([12, 11, 12, 13, 14, 16]),
+            expected_offset=(-0.5,),
         ),
         # Periodic BC
         dict(
@@ -782,11 +782,13 @@ class BoundaryConditionsImposingTest(test_utils.TestCase):
             values=((1.0, 2.0), (3.0, 4.0)),
             expected_data=tensor(
                 [
-                    [11, 12, 13, 14],
-                    [21, 22, 23, 24],
-                    [2, 2, 2, 2],
+                    [5, 1, 1, 1, 1, 7],
+                    [-5, 11, 12, 13, 14, -6],
+                    [-15, 21, 22, 23, 24, -16],
+                    [4, 2, 2, 2, 2, 6],
                 ]
             ),
+            expected_offset=(0.0, -0.5),
         ),
         dict(
             input_data=tensor(
@@ -800,22 +802,81 @@ class BoundaryConditionsImposingTest(test_utils.TestCase):
             values=((1.0, 2.0), (3.0, 4.0)),
             expected_data=tensor(
                 [
-                    [3, 12, 13, 14],
-                    [3, 22, 23, 24],
-                    [3, 32, 33, 34],
+                    [3, -10, -11, -12, 4],
+                    [3, 12, 13, 14, 4],
+                    [3, 22, 23, 24, 4],
+                    [3, 32, 33, 34, 4],
+                    [3, -28, -29, -30, 4],
                 ]
             ),
+            expected_offset=(-0.5, 0.0),
         ),
     )
     def test_impose_bc_2d_constant_boundary(
-        self, input_data, offset, values, expected_data
+        self, input_data, offset, values, expected_data, expected_offset
     ):
         grid = grids.Grid(input_data.shape)
         bc = boundaries.dirichlet_boundary_conditions(grid.ndim, values)
         variable = grids.GridVariable(input_data, offset, grid, bc)
-        variable = bc.impose_bc(variable)
-        expected = grids.GridVariable(expected_data, offset, grid)
+        variable = variable.impose_bc()
+        expected = grids.GridVariable(expected_data, expected_offset, grid)
         self.assertArrayEqual(variable, expected)
+
+    @parameterized.parameters(
+        dict(
+            bc_types=(((BCType.DIRICHLET, BCType.NEUMANN),), ((1.0, 2.0),)),
+            input_data=tensor([11, 12, 13, 14]),
+            input_offset=(0.5,),
+            width=((2, 1),),
+            expected_data=tensor([-10, -9, 11, 12, 13, 14, 16]),
+            expected_offset=(-1.5,),
+        ),
+        dict(
+            bc_types=(((BCType.DIRICHLET, BCType.NEUMANN),), ((1.0, 2.0),)),
+            input_data=tensor([11, 12, 13, 14]),
+            input_offset=(0.5,),
+            width=((2, 0),),
+            expected_data=tensor([-10, -9, 11, 12, 13, 14]),
+            expected_offset=(-1.5,),
+        ),
+        dict(
+            bc_types=(
+                (
+                    (BCType.PERIODIC, BCType.PERIODIC),
+                    (BCType.DIRICHLET, BCType.DIRICHLET),
+                ),
+                ((0.0, 0.0), (0.0, 0.0)),
+            ),
+            input_data=tensor(
+                [
+                    [11, 12, 13, 14],
+                    [21, 22, 23, 24],
+                    [31, 32, 33, 34],
+                ]
+            ),
+            input_offset=(0.5, 1),
+            width=((1, 1), (1, 1)),
+            expected_data=tensor(
+                [
+                    [0, 31, 32, 33, 0, -33],
+                    [0, 11, 12, 13, 0, -13],
+                    [0, 21, 22, 23, 0, -23],
+                    [0, 31, 32, 33, 0, -33],
+                    [0, 11, 12, 13, 0, -13],
+                ]
+            ),
+            expected_offset=(-0.5, 0.0),
+        ),
+    )
+    def test_pad_all(
+        self, bc_types, input_data, input_offset, width, expected_data, expected_offset
+    ):
+        grid = grids.Grid(input_data.shape)
+        array = grids.GridVariable(input_data, input_offset, grid)
+        bc = boundaries.ConstantBoundaryConditions(bc_types[0], bc_types[1])
+        actual = bc.pad_all(array, width, mode=boundaries.Padding.MIRROR)
+        expected = grids.GridVariable(expected_data, expected_offset, grid)
+        self.assertArrayEqual(actual, expected)
 
 
 class PressureBoundaryConditionsTest(test_utils.TestCase):
