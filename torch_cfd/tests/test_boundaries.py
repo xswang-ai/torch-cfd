@@ -24,6 +24,7 @@ from absl.testing import absltest, parameterized
 from torch_cfd import boundaries, grids, test_utils
 
 BCType = boundaries.BCType
+Padding = boundaries.Padding
 
 tensor = partial(torch.tensor, dtype=torch.float32)
 
@@ -704,7 +705,7 @@ class BoundaryConditionsImposingTest(test_utils.TestCase):
         grid = grids.Grid((grid_size,))
         array = grids.GridVariable(input_data, input_offset, grid)
         bc = boundaries.ConstantBoundaryConditions(bc_types[0], bc_types[1])
-        actual = bc.pad_and_impose_bc(array, expected_offset)
+        actual = bc.pad_and_impose_bc(array, expected_offset, mode=Padding.EXTEND)
         expected = grids.GridVariable(expected_data, expected_offset, grid)
         self.assertArrayEqual(actual, expected)
 
@@ -765,7 +766,7 @@ class BoundaryConditionsImposingTest(test_utils.TestCase):
         grid = grids.Grid((grid_size,))
         bc = boundaries.ConstantBoundaryConditions(bc_types[0], bc_types[1])
         array = grids.GridVariable(input_data, input_offset, grid, bc)
-        actual = bc.impose_bc(array)
+        actual = bc.impose_bc(array, mode=Padding.EXTEND)
         expected = grids.GridVariable(expected_data, expected_offset, grid, bc)
         self.assertArrayEqual(actual, expected)
 
@@ -818,7 +819,7 @@ class BoundaryConditionsImposingTest(test_utils.TestCase):
         grid = grids.Grid(input_data.shape)
         bc = boundaries.dirichlet_boundary_conditions(grid.ndim, values)
         variable = grids.GridVariable(input_data, offset, grid, bc)
-        variable = variable.impose_bc()
+        variable = variable.impose_bc(mode=Padding.EXTEND)
         expected = grids.GridVariable(expected_data, expected_offset, grid)
         self.assertArrayEqual(variable, expected)
 

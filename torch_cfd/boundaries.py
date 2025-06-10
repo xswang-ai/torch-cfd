@@ -345,7 +345,7 @@ class ConstantBoundaryConditions(BoundaryConditions):
         self,
         u: GridVariable,
         offset_to_pad_to: Optional[Tuple[float, ...]] = None,
-        mode: Optional[str] = "extend",
+        mode: Optional[str] = "",
     ) -> GridVariable:
         """Returns GridVariable with correct boundary values.
 
@@ -353,7 +353,7 @@ class ConstantBoundaryConditions(BoundaryConditions):
         Args:
             - u: a `GridVariable` object that specifies only scalar values on the internal nodes.
             - offset_to_pad_to: a Tuple of desired offset to pad to. Note that if the function is given just an interior array in dirichlet case, it can pad to both 0 offset and 1 offset.
-            - mode: type of padding to use in non-periodic case. Mirror mirrors the flow across the boundary. Extend extends the last well-defined value past the boundary.
+            - mode: type of padding to use in non-periodic case. Mirror mirrors the flow across the boundary. Extend extends the last well-defined value past the boundary. None means no ghost cell padding.
 
         Returns:
         A GridVariable that has correct boundary values.
@@ -364,16 +364,27 @@ class ConstantBoundaryConditions(BoundaryConditions):
         for dim in range(-u.grid.ndim, 0):
             _ = self._is_aligned(u, dim)
             if self.types[dim][0] != BCType.PERIODIC:
-                # if the offset is either 0 or 1, u is aligned with the boundary and is defined on cell edges on one side of the boundary, if trim_boundary is called before this function.
-                # u needs to be padded on both sides
-                # if the offset is 0.5, one ghost cell is needed on each side.
-                # it will be taken care by grids.pad function automatically.
-                u = grids.pad(u, (1, 1), dim, self)
-            elif self.types[dim][0] == BCType.PERIODIC:
-                return GridVariable(u.data, u.offset, u.grid, self)
-        return u
+                if mode:
+                    # if the offset is either 0 or 1, u is aligned with the boundary and is defined on cell edges on one side of the boundary, if trim_boundary is called before this function.
+                    # u needs to be padded on both sides
+                    # if the offset is 0.5, one ghost cell is needed on each side.
+                    # it will be taken care by grids.pad function automatically.
+                    u = grids.pad(u, (1, 1), dim, self, mode=mode)
+                elif self.types[dim][0] == BCType.DIRICHLET and not mode:
+                    if math.isclose(offset_to_pad_to[dim], 1.0):
+                        u = grids.pad(u, 1, dim, self)
+                    elif math.isclose(offset_to_pad_to[dim], 0.0):
+                        u = grids.pad(u, -1, dim, self)
+                elif self.types[dim][0] == BCType.NEUMANN and not mode:
+                    if not math.isclose(offset_to_pad_to[dim], 0.5):
+                        raise ValueError("Neumann bc is not defined on edges.")
+                else:
+                    raise NotImplementedError(
+                        f"Padding for {self.types[dim][0]} boundary conditions is not implemented."
+                    )
+        return GridVariable(u.data, u.offset, u.grid, self)
 
-    def impose_bc(self, u: GridVariable) -> GridVariable:
+    def impose_bc(self, u: GridVariable, mode: str="") -> GridVariable:
         """Returns GridVariable with correct boundary condition.
 
         Some grid points of GridVariable might coincide with boundary. This ensures
@@ -382,11 +393,11 @@ class ConstantBoundaryConditions(BoundaryConditions):
         u: a `GridVariable` object.
 
         Returns:
-        A GridVariable that has correct boundary values with ghost cells added on the other side of DoFs living at cell center if the bc is Dirichlet or Neumann.
+        A GridVariable that has correct boundary values. If ghost_cell == True, then ghost cells are added on the other side of DoFs living at cell center if the bc is Dirichlet or Neumann.
         """
         offset = u.offset
         u = self.trim_boundary(u)
-        u = self.pad_and_impose_bc(u, offset)
+        u = self.pad_and_impose_bc(u, offset, mode)
         return u
 
 

@@ -36,6 +36,21 @@ _HANDLED_TYPES = (numbers.Number, torch.Tensor)
 T = TypeVar("T")  # for GridVariable vector
 
 
+class BCType:
+    PERIODIC = "periodic"
+    DIRICHLET = "dirichlet"
+    NEUMANN = "neumann"
+    ROBIN = "robin"
+    NONE = None
+
+
+class Padding:
+    MIRROR = "reflect"
+    EXTEND = "replicate"
+    SYMMETRIC = "symmetric"
+    NONE = ""
+
+
 @dataclasses.dataclass(init=False, frozen=True)
 class Grid:
     """
@@ -112,7 +127,7 @@ class Grid:
     def __repr__(self) -> str:
         lines = [f"Grid({self.ndim}D):"]
         lines.append(f"  shape: {self.shape}")
-    
+
         for i in range(self.ndim):
             lower, upper = self.domain[i]
             step = self.step[i]
@@ -241,20 +256,6 @@ class Grid:
         return GridVariable(fn(*self.mesh(offset)), offset, self)
 
 
-class BCType:
-    PERIODIC = "periodic"
-    DIRICHLET = "dirichlet"
-    NEUMANN = "neumann"
-    ROBIN = "robin"
-    NONE = None
-
-
-class Padding:
-    MIRROR = "reflect"
-    EXTEND = "replicate"
-    SYMMETRIC = "symmetric"
-
-
 @dataclasses.dataclass(init=False, frozen=True)
 class BoundaryConditions:
     """Base class for boundary conditions on a PDE variable.
@@ -322,12 +323,13 @@ class BoundaryConditions:
     def impose_bc(
         self,
         u: GridVariable,
+        mode: Optional[str] = ""
     ) -> GridVariable:
         """Impose boundary conditions on the grid variable."""
         raise NotImplementedError(
             "impose_bc() not implemented in BoundaryConditions base class."
         )
-    
+
     def pad_and_impose_bc(
         self,
         u: GridVariable,
@@ -778,7 +780,7 @@ class GridVariable(GridTensorOpsMixin):
         interior_grid = self._interior_grid()
         return GridVariable(interior_array, self.offset, interior_grid)
 
-    def impose_bc(self) -> GridVariable:
+    def impose_bc(self, mode: str="") -> GridVariable:
         """Returns the GridVariable with edge BC enforced, if applicable.
 
         For GridVariables having nonperiodic BC and offset 0 or 1, there are values
@@ -786,7 +788,7 @@ class GridVariable(GridTensorOpsMixin):
         impose_bc() changes these boundary values to match the prescribed BC.
         """
         assert self.bc is not None, "Boundary conditions must be set to impose BC."
-        return self.bc.impose_bc(self)
+        return self.bc.impose_bc(self, mode)
 
     def enforce_edge_bc(self, *args) -> GridVariable:
         """Returns the GridVariable with edge BC enforced, if applicable.
@@ -1030,9 +1032,11 @@ def pad(
     assert not (
         u.bc is None and bc is None and bc_types is None
     ), "u.bc, bc, and bc_types cannot be None at the same time"
-    assert mode in [Padding.MIRROR, Padding.EXTEND, Padding.SYMMETRIC], (
-    f"Padding mode must be one of ['{Padding.MIRROR}', '{Padding.EXTEND}', '{Padding.SYMMETRIC}'], got '{mode}'"
-)
+    assert mode in [
+        Padding.MIRROR,
+        Padding.EXTEND,
+        Padding.SYMMETRIC,
+    ], f"Padding mode must be one of ['{Padding.MIRROR}', '{Padding.EXTEND}', '{Padding.SYMMETRIC}'], got '{mode}'"
     bc = bc if bc is not None else u.bc
     bc_types = bc.types[dim] if bc_types is None else bc_types
     values = bc.bc_values if values is None else values
@@ -1112,9 +1116,7 @@ def pad(
                     return GridVariable(data, tuple(new_offset), u.grid, bc)
                 elif mode == Padding.MIRROR:
                     bc_padding = [(0, 0)] * u.grid.ndim
-                    bc_padding[dim] = tuple(
-                        1 if pad > 0 else 0 for pad in padding
-                    )
+                    bc_padding[dim] = tuple(1 if pad > 0 else 0 for pad in padding)
                     # subtract the padded cell
                     full_padding_past_bc = [(0, 0)] * u.grid.ndim
                     full_padding_past_bc[dim] = tuple(
@@ -1125,13 +1127,17 @@ def pad(
                         u.data, bc_padding, mode="constant", constant_values=(0, 0)
                     )
                     padding_values = list(values)
-                    padding_values[dim] = tuple([pad / 2 for pad in padding_values[dim]])
+                    padding_values[dim] = tuple(
+                        [pad / 2 for pad in padding_values[dim]]
+                    )
                     data = 2 * expand_dims_pad(
                         u.data,
                         full_padding,
                         mode="constant",
                         constant_values=padding_values,
-                    ) - expand_dims_pad(expanded_data, full_padding_past_bc, mode="reflect")
+                    ) - expand_dims_pad(
+                        expanded_data, full_padding_past_bc, mode="reflect"
+                    )
                 return GridVariable(data, tuple(new_offset), u.grid, bc)
             else:
                 raise ValueError(
@@ -1203,7 +1209,9 @@ def expand_dims_pad(
     inputs: torch.Tensor,
     pad: Sequence[Tuple[int, int]],
     mode: str = "constant",
-    constant_values: Union[float, Tuple[float, float], Sequence[Tuple[float, float]]] = 0,
+    constant_values: Union[
+        float, Tuple[float, float], Sequence[Tuple[float, float]]
+    ] = 0,
     **kwargs,
 ) -> torch.Tensor:
     """
