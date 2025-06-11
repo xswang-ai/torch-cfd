@@ -11,6 +11,7 @@ import os
 
 import torch
 import torch.fft as fft
+import torch.nn.functional as F
 from torch_cfd.finite_differences import curl_2d
 from torch_cfd.forcings import KolmogorovForcing
 

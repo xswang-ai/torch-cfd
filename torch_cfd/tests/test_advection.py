@@ -206,6 +206,10 @@ class AdvectionTestAnalytical(test_utils.TestCase):
         offset,
     ):
         def _step_func(v, dt, method):
+            """
+            dt/2 is used because for Burgers equation
+            the flux is u_t + (0.5*u^2)_x = 0
+            """
             dv_dt = method(c=v[0], v=v, dt=dt) / 2
             return (bc.impose_bc(v[0].data + dt * dv_dt),)
 
@@ -219,16 +223,12 @@ class AdvectionTestAnalytical(test_utils.TestCase):
         step = 2 * math.pi / 1000
         offset = (offset,)
         grid = grids.Grid(shape, domain=((0.0, 2 * math.pi),))
-        bc = boundaries.dirichlet_boundary_conditions(grid.ndim)
+        bc = boundaries.dirichlet_boundary_conditions(grid.ndim, bc_values=[(0.0, 0.0),])
         v = (bc.impose_bc(_velocity_implicit(grid, offset, 0, 0)),)
         dt = cfl_number * step
         advect = advect_van_leer(grid, offset)
 
         for _ in range(num_steps):
-            """
-            dt/2 is used because for Burgers equation
-            the flux is u_t + (0.5*u^2)_x = 0
-            """
             v = _step_func(v, dt, method=advect)
 
         expected = bc.impose_bc(
