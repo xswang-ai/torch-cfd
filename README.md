@@ -9,10 +9,12 @@ This repository contains mainly two parts:
 
 ### Part I: a native PyTorch port of [Google's Computational Fluid Dynamics package in Jax](https://github.com/google/jax-cfd)
 The main changes are documented in the `README.md` under the [`torch_cfd` directory](./torch_cfd/). The most significant changes in all routines include:
-  - Routines that rely on the functional programming of Jax have been rewritten to be the PyTorch's tensor-in-tensor-out style, which is arguably more user-friendly to debugging as one can view intermediate tensors in VS Code debugger, set.
+  - Supports for nonhomogenous boundary conditions, many routines in Jax-CFD only work with only periodic boundary.
+  - Routines that rely on the functional programming of Jax have been rewritten to be the PyTorch's tensor-in-tensor-out style, which is arguably more user-friendly to debugging as one can view intermediate values in tensors in VS Code debugger, opposed to Jax's `JaxprTrace`.
+  - All operations take into consideration the batch dimension of tensors `(b, *, n, m)` regardless of `*` dimension, for example, `(b, T, C, n, m)`, which is similar to PyTorch behavior. In the original Jax-CFD package, only a single trajectory is implemented. The stencil operators are changed to generally operate from the last dimension using negative indexing, following `torch.nn.functional.pad`'s behavior.
   - Functions and operators are in general implemented as `nn.Module` like a factory template.
-  - Jax-cfd's `funcutils.trajectory` function supports tracking only one field variable (vorticity or velocity). For this port, extra fields computation and tracking are made more accessible, such as time derivatives $\partial_t\mathbf{u}_h$ and PDE residual $R(\mathbf{u}_h):=\mathbf{f}-\partial_t \mathbf{u}_h-(\mathbf{u}_h\cdot\nabla)\mathbf{u}_h + \nu \Delta \mathbf{u}_h$.
-  - All ops take into consideration the batch dimension of tensors `(b, *, n, m)` regardless of `*` dimension, for example, `(b, T, C, n, m)`, which is similar to PyTorch behavior. In Google Research's original Jax-CFD package, only a single trajectory is implemented. The stencil operations generally starts from the last dimension using negative indexing, following `torch.nn.functional.pad`'s behavior.
+  - Jax-CFD's `funcutils.trajectory` function supports tracking only one field variable (vorticity or velocity). in Torch-CFD, extra fields computation and tracking are more accessible and easier for user to add, such as time derivatives $\partial_t\mathbf{u}_h$ and PDE residual $R(\mathbf{u}_h):=\mathbf{f}-\partial_t \mathbf{u}_h-(\mathbf{u}_h\cdot\nabla)\mathbf{u}_h + \nu \Delta \mathbf{u}_h$.
+
 
 ### Part II: Spectral-Refiner: Neural Operator-Assisted Navier-Stokes Equations simulator.
   - The **Spatiotemporal Fourier Neural Operator** (SFNO) is a spacetime tensor-to-tensor learner (or trajectory-to-trajectory), available in the [`fno` directory](./fno). Different components of FNO have been re-implemented keeping the conciseness of the original implementation while allowing modern expansions. We draw inspiration from the [3D FNO in Nvidia's Neural Operator repo](https://github.com/neuraloperator/neuraloperator), [Transformers-based neural operators](https://github.com/thuml/Neural-Solver-Library), as well as Temam's book on functional analysis for the NSE. 
@@ -43,8 +45,9 @@ Data generation instructions are available in the [SFNO folder](./fno).
 
 ## Examples
 - Demos of different simulation setups:
-  - [2D simulation with a pseudo-spectral solver](./examples/Kolmogrov2d_rk4_spectral_forced_turbulence.ipynb)
-  - [2D simulation with a finite volume solver](./examples/Kolmogrov2d_rk4_fvm_forced_turbulence.ipynb)
+  - [2D Lid-driven cavity with a random field perturbation using finite volume](./examples/Lid-driven_cavity_rk4_fvm.ipynb)
+  - [2D decaying isotropic turbulence using the pseudo-spectral method](./examples/Kolmogrov2d_rk4_spectral_forced_turbulence.ipynb)
+  - [2D Kolmogorov flow using finite volume method](./examples/Kolmogrov2d_rk4_fvm_forced_turbulence.ipynb)
 - Demos of Spatiotemporal FNO's training and evaluation using the neural operator-assisted fluid simulation pipelines
   - [Training of SFNO for only 15 epochs for the isotropic turbulence example](./examples/ex2_SFNO_train.ipynb)
   - [Training of SFNO for only ***10*** epochs with 1k samples and reach `1e-2` level of relative error](./examples/ex2_SFNO_train_fnodata.ipynb) using the data in the FNO paper, which to our best knowledge no operator learner can do this in <100 epochs in the small data regime.
@@ -60,8 +63,8 @@ The Apache 2.0 License in the root folder applies to the `torch-cfd` folder of t
 PR welcome. Currently, the port of `torch-cfd` currently includes:
 - The pseudospectral method for vorticity uses anti-aliasing filtering techniques for nonlinear terms to maintain stability.
 - The finite volume method on a MAC grid for velocity, and using the projection scheme to impose the divergence free condition.
-- Temporal discretization: Currently only RK4 temporal discretization uses explicit time-stepping for advection and either implicit or explicit time-stepping for diffusion.
-- Boundary conditions: only periodic boundary conditions.
+- Temporal discretization: Currently only RK4-family of marching schemes uses explicit time-stepping for advection, either implicit or explicit time-stepping for diffusion.
+- Boundary conditions: only periodic and Dirichlet boundary conditions.
 
 ## Reference
 

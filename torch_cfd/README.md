@@ -1,12 +1,25 @@
 # TODO
 
-- [x] add native PyTorch implementation for applying `torch.linalg` and `torch.fft` function directly on `GridArray` and `GridVariable` (added 0.1.).
 - [x] add discrete Helmholtz decomposition (pressure projection) in both spatial and spectral domains (added 0.0.1).
 - [x] adjust the functions and routines to act on `(batch, time, *spatial)` tensor, currently only `(*spatial)` is supported (added for key routines in 0.0.1).
 - [x] add native FFT-based vorticity computation, instead of taking finite differences for pseudo-spectral (added in 0.0.4).
-- [ ] add no-slip boundary.
+- [x] add native PyTorch implementation for applying `torch.linalg` and `torch.fft` function directly on `GridArray` and `GridVariable` (added 0.1.0).
+- [x] add no-slip boundary (added in 0.2.2).
+- [ ] support for function-valued boundary conditions.
 
 # Changelog
+
+### 0.2.3
+- Major fixes: Jax-CFD routines that does not work for non-homogeneous boundary conditions are rewritten:
+  - removed wrapping $\partial v/\partial t$ with $v$'s boundary condition (`explicit_terms_with_same_bcs` routine, which is wrong for nonhomogeneous bcs). 
+  - changed `pad` function to work with tuple padding inputs.
+  - fixed `pad` behavior on `offset==1.5` functions.
+  - fixed `bc.pad_all` behavior.`
+  - added a [`_symmetric_pad_tensor`](./grids.py#1348) function to match the behavior of `np.pad` with mode `symmetric` (symmetric padding across the boundary, not just mirror).
+  - changd the behavior of `pad_and_impose_bc` in `BoundaryCondition` class to correctly impose bc when ghost cells have to be presented, and added some tests.
+- advection module is completely refactored to as `nn.Module`, tests added for advection.
+- added `.norm` property and `__getitem__` for a `GridVariable`.
+- added `__repr__` for `Grid` and `GridVariable` for neater format when being printed.
 
 ### 0.2.0
 
