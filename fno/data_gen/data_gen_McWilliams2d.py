@@ -11,9 +11,10 @@ import os
 
 import torch
 import torch.fft as fft
+import torch.nn.functional as F
 
 from torch_cfd.grids import Grid
-from torch_cfd.initial_conditions import vorticity_field
+from torch_cfd.initial_conditions import filtered_vorticity_field
 from torch_cfd.equations import *
 
 from solvers import get_trajectory_imex
@@ -131,7 +132,7 @@ def main(args):
 
         vort_init = torch.stack(
             [
-                vorticity_field(
+                filtered_vorticity_field(
                     grid, peak_wavenumber, random_state=random_state + idx + k
                 ).data
                 for k in range(batch_size)

@@ -933,9 +933,9 @@ class GridVariableVector(GridVectorBase[GridVariable]):
             v.data = value
 
     @property
-    def array(self) -> Tuple[GridVariable, ...]:
+    def array(self) -> GridVariableVector:
         """Returns a tuple of GridVariables without boundary conditions."""
-        return tuple(v.array for v in self)
+        return GridVariableVector(tuple(v.array for v in self))
 
     @array.setter
     def array(self, values: Tuple[GridVariable, ...]):
