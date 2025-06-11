@@ -186,6 +186,11 @@ class RKStepper(nn.Module):
 
         Returns:
             Updated velocity field after one time step
+
+        Port note: 
+        - In Jax-CFD, dvdt is wrapped with the same bc with v, 
+          which does not work for inhomogeneous boundary condition.
+          see explicit_terms_with_same_bcs in jax_cfd/base/equation.py
         """
         alpha = self.params["a"]
         beta = self.params["b"]
@@ -206,6 +211,7 @@ class RKStepper(nn.Module):
                 if alpha[i - 1][j] != 0:
                     u_star = u_star + dt * alpha[i - 1][j] * k[j]
 
+            u_star = wrap_field_same_bcs(u_star, u0)
             u[i], _ = equation.pressure_projection(u_star)
             k[i] = equation.explicit_terms(u[i], dt)
 
@@ -214,8 +220,10 @@ class RKStepper(nn.Module):
             if beta[j] != 0:
                 u_star = u_star + dt * beta[j] * k[j]
 
+        u_star = wrap_field_same_bcs(u_star, u0)
         u_final, p = equation.pressure_projection(u_star)
 
+        u_final = wrap_field_same_bcs(u_final, u0)
         return u_final, p
 
 
@@ -309,9 +317,8 @@ class NavierStokes2DFVMProjection(ProjectionExplicitODE):
         dv_dt += self._diffusion(v)
         if forcing is not None:
             dv_dt += GridVariableVector(forcing(grid, v)) / density
-        dv_dt = wrap_field_same_bcs(dv_dt, v)
         if self.drag > 0.0:
-            dv_dt += -self.drag * v
+            dv_dt += -self.drag * v.array
         return dv_dt
 
     def explicit_terms(self, *args, **kwargs):

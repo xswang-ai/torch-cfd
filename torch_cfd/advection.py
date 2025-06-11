@@ -225,7 +225,7 @@ class AdvectAligned(nn.Module):
         grid: Grid,
         bcs_c: Tuple[boundaries.BoundaryConditions, ...],
         bcs_v: Tuple[boundaries.BoundaryConditions, ...],
-        offsets: Tuple[Tuple[float, ...], ...] = ((1.5, 0.5), (0.5, 1.5)),
+        offsets: Tuple[Tuple[float, ...], ...] = ((1.0, 0.5), (0.5, 1.0)),
         **kwargs,
     ):
         super().__init__()
@@ -281,10 +281,9 @@ class AdvectAligned(nn.Module):
         # flux's bc will become None
         flux = GridVariableVector(tuple(c * u for c, u in zip(cs, v)))
 
-        # Apply boundary conditions to flux if not periodic
-        flux = GridVariableVector(
-                tuple(bc.impose_bc(f) for f, bc in zip(flux, self.flux_bcs))
-            )
+        # wrap flux with boundary conditions to flux if not periodic
+        flux = GridVariableVector(tuple(GridVariable(f.data, offset, f.grid, bc) for f, offset, bc in zip(flux, self.offsets, self.flux_bcs)))
+        
 
         # Return negative divergence of flux
         # after taking divergence the bc becomes None
@@ -642,13 +641,14 @@ class ConvectionVector(nn.Module):
             boundaries.periodic_boundary_conditions(ndim=2),
             boundaries.periodic_boundary_conditions(ndim=2),
         ),
+        advect: type[nn.Module] = AdvectionVanLeer,
         limiter: Callable = van_leer_limiter,
         **kwargs,
     ):
         super().__init__()
 
         self.advect = nn.ModuleList(
-            AdvectionVanLeer(
+            advect(
                 grid=grid,
                 offset=offset,
                 bc_c=bc,

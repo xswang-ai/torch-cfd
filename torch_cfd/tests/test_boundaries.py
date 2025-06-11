@@ -382,9 +382,9 @@ class ConstantBoundaryConditionsTest(test_utils.TestCase):
             bc_types=(((BCType.DIRICHLET, BCType.NEUMANN),), ((1.0, 2.0),)),
             input_data=tensor([11, 12, 13, 14]),
             input_offset=(0.5,),
-            width=1,
-            expected_data=tensor([11, 12, 13, 14, 16]),
-            expected_offset=(0.5,),
+            width=(2, 1),
+            expected_data=tensor([-10, -9, 11, 12, 13, 14, 16]),
+            expected_offset=(-1.5,),
         ),
     )
     def test_pad_1d_inhomogeneous(

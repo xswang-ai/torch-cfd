@@ -387,6 +387,106 @@ class GridVariableBoundaryTest(test_utils.TestCase):
             self.assertEqual(u_interior.grid, grid)
 
     @parameterized.parameters(
+        # 1D Dirichlet boundary conditions
+        dict(
+            shape=(5,),
+            data=tensor([1, 2, 3, 4, 5]),
+            offset=(0.5,),
+            shift_offset=1,
+            bc_values=((0.0, 0.0),),
+            expected_data=tensor([2, 3, 4, 5, -5]),
+            expected_offset=(1.5,),
+        ),
+        dict(
+            shape=(5,),
+            data=tensor([1, 2, 3, 4, 5]),
+            offset=(0.0,),
+            shift_offset=-1,
+            bc_values=((0.0, 0.0),),
+            expected_data=tensor([0, 0, 2, 3, 4]),
+            expected_offset=(-1.0,),
+        ),
+        dict(
+            shape=(5,),
+            data=tensor([1, 2, 3, 4, 5]),
+            offset=(1.0,),
+            shift_offset=-1,
+            bc_values=((0.0, 0.0),),
+            expected_data=tensor([0, 1, 2, 3, 4]),
+            expected_offset=(0.0,),
+        ),
+    )
+    def test_shift_1d_dirichlet(
+        self,
+        shape,
+        data,
+        offset,
+        shift_offset,
+        bc_values,
+        expected_data,
+        expected_offset,
+    ):
+        """Test grids.shift with 1D arrays
+        """
+        grid = grids.Grid(shape)
+
+        bc = boundaries.dirichlet_boundary_conditions(
+            ndim=1, bc_values=bc_values)
+        u = grids.GridVariable(data, offset, grid, bc)
+        u = u.impose_bc()
+
+        u_shifted = u.shift(offset=shift_offset, dim=-1)
+
+        # Check results
+        self.assertArrayEqual(u_shifted.data, expected_data)
+        self.assertEqual(u_shifted.offset, expected_offset)
+        self.assertEqual(u_shifted.grid, grid)
+        self.assertIsNone(u_shifted.bc)
+
+    @parameterized.parameters(
+        # 1D Periodic boundary conditions
+        dict(
+            shape=(6,),
+            data=tensor([1, 2, 3, 4, 5, 6]),
+            offset=(0.0,),
+            shift_offset=1,
+            expected_data=tensor([2, 3, 4, 5, 6, 1]),
+            expected_offset=(1.0,),
+        ),
+        # Edge case: shift by 0 (should return unchanged)
+        dict(
+            shape=(5,),
+            data=tensor([5, 6, 7, 8, 9]),
+            offset=(0.5,),
+            shift_offset=-1,
+            expected_data=tensor([9, 5, 6, 7, 8]),
+            expected_offset=(-0.5,),
+        ),
+    )
+    def test_shift_1d_periodic(
+        self,
+        shape,
+        data,
+        offset,
+        shift_offset,
+        expected_data,
+        expected_offset,
+    ):
+        """Test grids.shift with 1D arrays and various boundary conditions."""
+        grid = grids.Grid(shape)
+
+        bc = boundaries.periodic_boundary_conditions(
+            ndim=1)
+        u = grids.GridVariable(data, offset, grid, bc)
+        u_shifted = u.shift(offset=shift_offset, dim=0)
+
+        self.assertArrayEqual(u_shifted.data, expected_data)
+        self.assertEqual(u_shifted.offset, expected_offset)
+        self.assertEqual(u_shifted.grid, grid)
+        self.assertIsNone(u_shifted.bc)
+
+
+    @parameterized.parameters(
         dict(
             shape=(10,),
             bc=boundaries.periodic_boundary_conditions(ndim=1),
@@ -591,7 +691,8 @@ class GridVariableBoundaryTestBatch(test_utils.TestCase):
             u = grids.GridVariable(data, offset, grid, bc)
             u_interior = u.trim_boundary()
             expected_single = tensor(
-                [[11, 12, 13, 14, 15], [21, 22, 23, 24, 25], [31, 32, 33, 34, 35]])
+                [[11, 12, 13, 14, 15], [21, 22, 23, 24, 25], [31, 32, 33, 34, 35]]
+            )
             expected = repeat(expected_single, "x y -> b x y", b=batch_size)
             self.assertArrayEqual(u_interior.data, expected)
             self.assertEqual(u_interior.offset, offset)
@@ -602,7 +703,8 @@ class GridVariableBoundaryTestBatch(test_utils.TestCase):
             u = grids.GridVariable(data, offset, grid, bc)
             u_interior = u.trim_boundary()
             expected_single = tensor(
-                [[11, 12, 13, 14], [21, 22, 23, 24], [31, 32, 33, 34]])
+                [[11, 12, 13, 14], [21, 22, 23, 24], [31, 32, 33, 34]]
+            )
             expected = repeat(expected_single, "x y -> b x y", b=batch_size)
             self.assertArrayEqual(u_interior.data, expected)
             self.assertEqual(u_interior.shape, (batch_size, 3, 4))
@@ -612,7 +714,8 @@ class GridVariableBoundaryTestBatch(test_utils.TestCase):
             u = grids.GridVariable(data, offset, grid, bc)
             u_interior = u.trim_boundary()
             expected_single = tensor(
-                [[21, 22, 23, 24, 25], [31, 32, 33, 34, 35], [41, 42, 43, 44, 45]])
+                [[21, 22, 23, 24, 25], [31, 32, 33, 34, 35], [41, 42, 43, 44, 45]]
+            )
             expected = repeat(expected_single, "x y -> b x y", b=batch_size)
             self.assertArrayEqual(u_interior.data, expected)
             self.assertEqual(u_interior.shape, (batch_size, 3, 5))
@@ -622,7 +725,8 @@ class GridVariableBoundaryTestBatch(test_utils.TestCase):
             u = grids.GridVariable(data, offset, grid, bc)
             u_interior = u.trim_boundary()
             expected_single = tensor(
-                [[22, 23, 24, 25], [32, 33, 34, 35], [42, 43, 44, 45]])
+                [[22, 23, 24, 25], [32, 33, 34, 35], [42, 43, 44, 45]]
+            )
             expected = repeat(expected_single, "x y -> b x y", b=batch_size)
             self.assertArrayEqual(u_interior.data, expected)
             self.assertEqual(u_interior.shape, (batch_size, 3, 4))
@@ -637,7 +741,8 @@ class GridVariableBoundaryTestBatch(test_utils.TestCase):
                     [22, 23, 24, 25],
                     [32, 33, 34, 35],
                     [42, 43, 44, 45],
-                ])
+                ]
+            )
             expected = repeat(expected_single, "x y -> b x y", b=batch_size)
 
             self.assertArrayEqual(u_interior.data, expected)
@@ -865,7 +970,8 @@ class GridVariableTrimBoundaryTest(test_utils.TestCase):
                 [41, 42, 43, 44, 45, 46, 47, 48],
                 [51, 52, 53, 54, 55, 56, 57, 58],
                 [61, 62, 63, 64, 65, 66, 67, 68],
-            ])
+            ]
+        )
 
         # Test compatible cases - where Neumann BC aligns with variable offset
         with self.subTest("compatible_center_offset"):
@@ -1115,9 +1221,7 @@ class GridTest(test_utils.TestCase):
             axes = grid.axes()
             self.assertLen(axes, 2)
             self.assertAllClose(axes[0], tensor([-1.5, -0.5, 0.5, 1.5]))
-            self.assertAllClose(
-                axes[1], tensor([0.25, 0.75, 1.25, 1.75, 2.25, 2.75])
-            )
+            self.assertAllClose(axes[1], tensor([0.25, 0.75, 1.25, 1.75, 2.25, 2.75]))
             mesh = grid.mesh()
             self.assertLen(mesh, 2)
             self.assertEqual(mesh[0].shape, (4, 6))

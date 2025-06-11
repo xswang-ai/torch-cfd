@@ -320,11 +320,7 @@ class BoundaryConditions:
             "trim_boundary() not implemented in BoundaryConditions base class."
         )
 
-    def impose_bc(
-        self,
-        u: GridVariable,
-        mode: Optional[str] = ""
-    ) -> GridVariable:
+    def impose_bc(self, u: GridVariable, mode: Optional[str] = "") -> GridVariable:
         """Impose boundary conditions on the grid variable."""
         raise NotImplementedError(
             "impose_bc() not implemented in BoundaryConditions base class."
@@ -537,7 +533,7 @@ class GridVariable(GridTensorOpsMixin):
 
     def __repr__(self) -> str:
         lines = [f"GridVariable:"]
-        lines.append(f"data tensor: \n{self.data.detach().numpy()}")
+        lines.append(f"data tensor: \n{self.data.cpu().detach().numpy()}")
         lines.append(f"data shape: {tuple(s for s in self.data.shape)}")
         lines.append(f"offset: {self.offset}")
         lines.append(f"grid shape: {self.grid.shape}")
@@ -780,7 +776,7 @@ class GridVariable(GridTensorOpsMixin):
         interior_grid = self._interior_grid()
         return GridVariable(interior_array, self.offset, interior_grid)
 
-    def impose_bc(self, mode: str="") -> GridVariable:
+    def impose_bc(self, mode: str = "") -> GridVariable:
         """Returns the GridVariable with edge BC enforced, if applicable.
 
         For GridVariables having nonperiodic BC and offset 0 or 1, there are values
@@ -1037,7 +1033,7 @@ def pad(
         Padding.EXTEND,
         Padding.SYMMETRIC,
     ], f"Padding mode must be one of ['{Padding.MIRROR}', '{Padding.EXTEND}', '{Padding.SYMMETRIC}'], got '{mode}'"
-    bc = bc if bc is not None else u.bc
+    bc = bc if bc is not None else u.bc  # use bc in priority
     bc_types = bc.types[dim] if bc_types is None else bc_types
     values = bc.bc_values if values is None else values
     if isinstance(width, int):
@@ -1086,11 +1082,16 @@ def pad(
         if math.isclose(u.offset[dim] % 1, 0.5):  # cell center
             # make the linearly interpolated value equal to the boundary by setting
             # the padded values to the negative symmetric values
+            # on the left side if u.offset is either 0.5 or 1.5, width = -1
+            # then (u - bc_val)/u.offset = (u_padded - bc_val)/(u.offset + width)
+            # here the implemenation assumes that the left pad and the right pad widths are the same when u.offset == 0.5 and only left needs to be padded when u.offset == 1.5
+
             if any(p > 1 for p in padding):
                 mode = Padding.SYMMETRIC
-            data = 2 * expand_dims_pad(
+            _alpha = 1 / u.offset[dim]
+            data = _alpha * expand_dims_pad(
                 u.data, full_padding, mode="constant", constant_values=values
-            ) - expand_dims_pad(u.data, full_padding, mode=mode)
+            ) + (1 - _alpha) * expand_dims_pad(u.data, full_padding, mode=mode)
             return GridVariable(data, tuple(new_offset), u.grid, bc)
         elif math.isclose(u.offset[dim] % 1, 0):  # cell edge
             # First the value on
