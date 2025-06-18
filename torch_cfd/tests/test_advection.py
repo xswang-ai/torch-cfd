@@ -76,6 +76,10 @@ def _unit_velocity(grid, velocity_sign=1.0):
         )
     )
 
+def _velocity_implicit(grid, offset, u, t):
+    """Returns solution of a Burgers equation at time `t`."""
+    x = grid.mesh(offset)[0]
+    return grids.GridVariable(torch.sin(x - u * t), offset, grid)
 
 def _total_variation(c: GridVariable, dim: int = 0):
     next_values = c.shift(1, dim)
@@ -89,7 +93,85 @@ advect_van_leer = partial(advection.AdvectionVanLeer, limiter=identity)
 advect_van_leer_using_limiters = advection.AdvectionVanLeer
 
 
-class AdvectionTestAnalytical(test_utils.TestCase):
+class AdvectionTestAnalytical1D(test_utils.TestCase):
+    @parameterized.named_parameters(
+        dict(
+            testcase_name="dirichlet_1d_200_cell_center",
+            shape=(200,),
+            offset=0.5,
+            num_steps=200,
+        ),
+        dict(
+            testcase_name="dirichlet_1d_400_cell_center",
+            shape=(400,),
+            offset=0.5,
+            num_steps=400,
+        ),
+        dict(
+            testcase_name="dirichlet_1d_200_cell_edge_0",
+            shape=(200,),
+            offset=0.0,
+            num_steps=200,
+        ),
+        dict(
+            testcase_name="dirichlet_1d_400_cell_edge_0",
+            shape=(400,),
+            offset=0.0,
+            num_steps=400,
+        ),
+        dict(
+            testcase_name="dirichlet_1d_200_cell_edge_1",
+            shape=(200,),
+            offset=1.0,
+            num_steps=200,
+        ),
+        dict(
+            testcase_name="dirichlet_1d_400_cell_edge_1",
+            shape=(400,),
+            offset=1.0,
+            num_steps=400,
+        ),
+    )
+    def test_burgers_analytical_dirichlet_convergence(
+        self,
+        shape,
+        offset,
+        num_steps
+    ):
+        def _step_func(v, dt, method):
+            """
+            dt/2 is used because for Burgers equation
+            the flux is u_t + (0.5*u^2)_x = 0
+            """
+            dv_dt = method(c=v[0], v=v, dt=dt) / 2
+            return (bc.impose_bc(v[0].data + dt * dv_dt),)
+
+        cfl_number = 0.5
+        offset = (offset,)
+        grid = grids.Grid(shape, domain=((0.0, 2 * math.pi),))
+        bc = boundaries.dirichlet_boundary_conditions(
+            grid.ndim,
+            bc_values=[
+                (0.0, 0.0),
+            ],
+        )
+        v = (bc.impose_bc(_velocity_implicit(grid, offset, 0, 0)),)
+        dt = 1 / shape[0] # 1 is the time to develope the shock wave
+        dt *= cfl_number
+        atol = dt
+        rtol = cfl_number * 2 * math.pi / shape[0]
+        advect = advect_van_leer(grid, offset)
+
+        for _ in range(num_steps):
+            v = _step_func(v, dt, method=advect)
+
+        expected = bc.impose_bc(
+            _velocity_implicit(grid, offset, v[0].data, dt * num_steps)
+        ).data
+        self.assertAllClose(expected, v[0].data, atol=atol, rtol=rtol)
+
+
+class AdvectionTestAnalytical2D(test_utils.TestCase):
 
     @parameterized.named_parameters(
         dict(
@@ -154,87 +236,6 @@ class AdvectionTestAnalytical(test_utils.TestCase):
 
         self.assertAllClose(expected.data, ct.data, atol=atol, rtol=rtol)
 
-    @parameterized.named_parameters(
-        dict(
-            testcase_name="dirichlet_1d_200_cell_center",
-            shape=(200,),
-            atol=0.00025,
-            rtol=1 / 200,
-            offset=0.5,
-        ),
-        dict(
-            testcase_name="dirichlet_1d_400_cell_center",
-            shape=(400,),
-            atol=0.00007,
-            rtol=1 / 400,
-            offset=0.5,
-        ),
-        dict(
-            testcase_name="dirichlet_1d_200_cell_edge_0",
-            shape=(200,),
-            atol=0.0005,
-            rtol=1 / 200,
-            offset=0.0,
-        ),
-        dict(
-            testcase_name="dirichlet_1d_400_cell_edge_0",
-            shape=(400,),
-            atol=0.000125,
-            rtol=1 / 400,
-            offset=0.0,
-        ),
-        dict(
-            testcase_name="dirichlet_1d_200_cell_edge_1",
-            shape=(200,),
-            atol=0.0005,
-            rtol=1 / 200,
-            offset=1.0,
-        ),
-        dict(
-            testcase_name="dirichlet_1d_400_cell_edge_1",
-            shape=(400,),
-            atol=0.000125,
-            rtol=1 / 400,
-            offset=1.0,
-        ),
-    )
-    def test_burgers_analytical_dirichlet_convergence(
-        self,
-        shape,
-        atol,
-        rtol,
-        offset,
-    ):
-        def _step_func(v, dt, method):
-            """
-            dt/2 is used because for Burgers equation
-            the flux is u_t + (0.5*u^2)_x = 0
-            """
-            dv_dt = method(c=v[0], v=v, dt=dt) / 2
-            return (bc.impose_bc(v[0].data + dt * dv_dt),)
-
-        def _velocity_implicit(grid, offset, u, t):
-            """Returns solution of a Burgers equation at time `t`."""
-            x = grid.mesh(offset)[0]
-            return grids.GridVariable(torch.sin(x - u * t), offset, grid)
-
-        num_steps = 1000
-        cfl_number = 0.01
-        step = 2 * math.pi / 1000
-        offset = (offset,)
-        grid = grids.Grid(shape, domain=((0.0, 2 * math.pi),))
-        bc = boundaries.dirichlet_boundary_conditions(grid.ndim, bc_values=[(0.0, 0.0),])
-        v = (bc.impose_bc(_velocity_implicit(grid, offset, 0, 0)),)
-        dt = cfl_number * step
-        advect = advect_van_leer(grid, offset)
-
-        for _ in range(num_steps):
-            v = _step_func(v, dt, method=advect)
-
-        expected = bc.impose_bc(
-            _velocity_implicit(grid, offset, v[0].data, dt * num_steps)
-        ).data
-        self.assertAllClose(expected, v[0].data, atol=atol, rtol=rtol)
 
 class AdvectionTestProperties(test_utils.TestCase):
 

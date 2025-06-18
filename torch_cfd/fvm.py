@@ -14,21 +14,25 @@
 
 # Modifications copyright (C) 2025 S.Cao
 # ported Google's Jax-CFD functional template to PyTorch's tensor ops
+"""Finite volume methods on MAC grids with pressure projection."""
+
 from __future__ import annotations
 
-from typing import Callable, Dict, List, Optional, Sequence, Tuple
+from typing import Callable, Dict, List, Optional, Sequence, Tuple, Union
 
 import torch
 import torch.nn as nn
 
 import torch_cfd.finite_differences as fdm
-from torch_cfd import advection, boundaries, forcings, grids, pressure
+from torch_cfd import advection, boundaries, forcings, grids, solvers
 
 
 Grid = grids.Grid
 GridVariable = grids.GridVariable
 GridVariableVector = grids.GridVariableVector
+BoundaryConditions = boundaries.BoundaryConditions
 ForcingFn = forcings.ForcingFn
+Solver = solvers.SolverBase
 
 
 def wrap_field_same_bcs(v, field_ref):
@@ -52,7 +56,9 @@ class ProjectionExplicitODE(nn.Module):
         """
         raise NotImplementedError
 
-    def pressure_projection(self, *args, **kwargs) -> Tuple[GridVariableVector, GridVariable]:
+    def pressure_projection(
+        self, *args, **kwargs
+    ) -> Tuple[GridVariableVector, GridVariable]:
         """Pressure projection step."""
         raise NotImplementedError
 
@@ -107,7 +113,7 @@ class RKStepper(nn.Module):
         # Set the tableau first directly, either directly or from method name
         if tableau is not None:
             self.tableau = tableau
-        else:
+        elif method is not None:
             self.method = method
         self._set_params()
 
@@ -187,8 +193,8 @@ class RKStepper(nn.Module):
         Returns:
             Updated velocity field after one time step
 
-        Port note: 
-        - In Jax-CFD, dvdt is wrapped with the same bc with v, 
+        Port note:
+        - In Jax-CFD, dvdt is wrapped with the same bc with v,
           which does not work for inhomogeneous boundary condition.
           see explicit_terms_with_same_bcs in jax_cfd/base/equation.py
         """
@@ -196,8 +202,8 @@ class RKStepper(nn.Module):
         beta = self.params["b"]
         num_steps = len(beta)
 
-        u = [None] * num_steps
-        k = [None] * num_steps
+        u: List[Optional[GridVariableVector]] = [None] * num_steps
+        k: List[Optional[GridVariableVector]] = [None] * num_steps
 
         # First stage
         u[0] = u0
@@ -227,15 +233,151 @@ class RKStepper(nn.Module):
         return u_final, p
 
 
+class PressureProjection(nn.Module):
+    def __init__(
+        self,
+        grid: grids.Grid,
+        bc: BoundaryConditions,
+        dtype: torch.dtype = torch.float32,
+        solver: Union[str, Solver] = "pseudoinverse",
+        implementation: Optional[str] = None,
+        laplacians: Optional[List[torch.Tensor]] = None,
+        **solver_kwargs,
+    ):
+        """
+        Args:
+            grid: Grid object describing the spatial domain.
+            bc: Boundary conditions for the Laplacian operator (for pressure).
+            dtype: Tensor data type. For consistency purpose.
+            implementation: One of ['fft', 'rfft', 'matmul'].
+            circulant: If True, bc is periodical
+            laplacians: Precomputed Laplacian operators. If None, they are computed from the grid during initiliazation.
+            initial_guess_pressure: Initial guess for pressure. If None, a zero tensor is used.
+        """
+        super().__init__()
+        self.grid = grid
+        self.bc = bc
+        self.dtype = dtype
+        self.implementation = implementation
+        solvers._set_laplacian(self, laplacians, grid, bc)
+        self.ndim = grid.ndim
+
+        @property
+        def inverse(self) -> torch.Tensor:
+            return self.solver.inverse
+
+        @property
+        def operators(self) -> List[torch.Tensor]:
+            """Get the list of 1D Laplacian operators."""
+            return [getattr(self.solver, f"laplacian_{i}") for i in range(self.ndim)]
+
+        if isinstance(solver, nn.Module):
+            self.solver = solver
+        elif isinstance(solver, str):
+            if solver in ["conjugate_gradient", "cg"]:
+                self.solver = solvers.ConjugateGradient(
+                    grid=grid,
+                    bc=bc,
+                    dtype=dtype,
+                    laplacians=laplacians,
+                    pure_neumann=True,
+                    **solver_kwargs,
+                )
+            elif solver in ["pseudoinverse", "fft", "rfft", "svd"]:
+                self.solver = solvers.PseudoInverse(
+                    grid=grid,
+                    bc=bc,
+                    dtype=dtype,
+                    hermitian=True,
+                    implementation=implementation,
+                    laplacians=laplacians,
+                )
+            else:
+                raise NotImplementedError(f"Unsupported solver: {solver}")
+
+    def forward(self, v: GridVariableVector) -> Tuple[GridVariableVector, GridVariable]:
+        """Project velocity to be divergence-free."""
+        solver = self.solver.to(v.device)
+        if hasattr(self, "q0"):
+            # Use the previous pressure as initial guess
+            q0 = self.q0.to(v.device)
+        else:
+            # No previous pressure, use zero as initial guess
+            q0 = GridVariable(
+                torch.zeros_like(v[0].data, dtype=self.dtype),
+                v[0].offset,
+                v[0].grid,
+                v[0].bc,
+            ).to(v.device)
+            self.q0 = q0
+        _ = grids.consistent_grid(self.grid, *v)
+        pressure_bc = boundaries.get_pressure_bc_from_velocity(v)
+
+        rhs = fdm.divergence(v)
+        rhs_transformed = self.rhs_transform(rhs, pressure_bc)
+        rhs_inv = solver.solve(rhs_transformed, q0.data)
+        q = GridVariable(rhs_inv, rhs.offset, rhs.grid)
+        q = pressure_bc.impose_bc(q)
+        q_grad = fdm.forward_difference(q)
+        v_projected = GridVariableVector(
+            tuple(u.bc.impose_bc(u - q_g) for u, q_g in zip(v, q_grad))
+        )
+        self.q0 = q
+        # assert v_projected.__len__() == v.__len__()
+        return v_projected, q
+
+    @staticmethod
+    def rhs_transform(
+        u: GridVariable,
+        bc: BoundaryConditions,
+    ) -> torch.Tensor:
+        """Transform the RHS of pressure projection equation for stability."""
+        u_data = u.data  # (b, n, m) or (n, m)
+        ndim = u.grid.ndim
+        for dim in range(ndim):
+            if (
+                bc.types[dim][0] == boundaries.BCType.NEUMANN
+                and bc.types[dim][1] == boundaries.BCType.NEUMANN
+            ):
+                # Check if we have batched data
+                if u_data.ndim > ndim:
+                    # For batched data, calculate mean separately for each batch
+                    # Keep the batch dimension, reduce over grid dimensions
+                    dims = tuple(range(-ndim, 0))
+                    mean = torch.mean(u_data, dim=dims, keepdim=True)
+                else:
+                    # For non-batched data, calculate global mean
+                    mean = torch.mean(u_data)
+                u_data = u_data - mean
+        return u_data
+
+
 class NavierStokes2DFVMProjection(ProjectionExplicitODE):
     r"""incompressible Navier-Stokes velocity pressure formulation
 
     Runge-Kutta time stepper for the NSE discretized using a MAC grid FVM with a pressure projection Chorin's method. The x- and y-dofs of the velocity
     are on a staggered grid, which is reflected in the offset attr.
 
+    References:
+    - Sanderse, B., & Koren, B. (2012). Accuracy analysis of explicit Runge-Kutta methods applied to the incompressible Navier-Stokes equations. Journal of Computational Physics, 231(8), 3041-3063.
+    - Almgren, A. S., Bell, J. B., & Szymczak, W. G. (1996). A numerical method for the incompressible Navier-Stokes equations based on an approximate projection. SIAM Journal on Scientific Computing, 17(2), 358-369.
+    - Capuano, F., Coppola, G., Chiatto, M., & de Luca, L. (2016). Approximate projection method for the incompressible Navier-Stokes equations. AIAA journal, 54(7), 2179-2182.
+
+    Args:
+        viscosity: 1/Re
+        grid: Grid on which the fields are defined
+        bcs: Boundary conditions for the velocity field (default: periodic)
+        drag: Drag coefficient applied to the velocity field (default: 0.0)
+        density: Density of the fluid (default: 1.0)
+        convection: Convection term function (default: advection.ConvectionVector)
+        pressure_proj: Pressure projection function (default: pressure.PressureProjection)
+        forcing: Forcing function applied to the velocity field (default: None)
+        step_fn: Runge-Kutta stepper function (default: RKStepper with classic_rk4 method)
+
     Original implementation in Jax-CFD repository:
 
     - semi_implicit_navier_stokes in jax_cfd.base.fvm which returns a stepper function `time_stepper(ode, dt)` where `ode` specifies the explicit terms and the pressure projection.
+    - The pressure projection is done by calling `pressure.projection` which can solve the solver to solve the Poisson equation \Delta q = div(u).
     - The time_stepper is a wrapper function by jax.named_call(
       navier_stokes_rk()) that implements the various Runge-Kutta method according to the Butcher tableau.
     - navier_stokes_rk() implements Runge-Kutta time-stepping for the NSE using the explicit terms and pressure projection with equation as an input where user needs to specify the explicit terms and pressure projection.
@@ -253,10 +395,10 @@ class NavierStokes2DFVMProjection(ProjectionExplicitODE):
         bcs: Optional[Sequence[boundaries.BoundaryConditions]] = None,
         drag: float = 0.0,
         density: float = 1.0,
-        convection: Callable = None,
-        pressure_proj: Callable = None,
+        convection: Optional[Callable] = None,
+        pressure_proj: Optional[Callable] = None,
         forcing: Optional[ForcingFn] = None,
-        step_fn: RKStepper = None,
+        step_fn: Optional[RKStepper] = None,
         **kwargs,
     ):
         """
@@ -290,7 +432,7 @@ class NavierStokes2DFVMProjection(ProjectionExplicitODE):
         if self.pressure_proj is not None:
             self._projection = self.pressure_proj
             return
-        self._projection = pressure.PressureProjection(
+        self._projection = PressureProjection(
             grid=self.grid,
             bc=self.pressure_bc,
         )

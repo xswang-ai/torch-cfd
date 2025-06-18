@@ -23,7 +23,7 @@ import torch
 import torch.fft as fft
 import torch.nn as nn
 
-from torch_cfd import boundaries, grids, pressure
+from torch_cfd import boundaries, grids, fvm
 
 Grid = grids.Grid
 GridVariable = grids.GridVariable
@@ -122,7 +122,14 @@ def project_and_normalize(
     grid = grids.consistent_grid_arrays(*v)
     pressure_bc = boundaries.get_pressure_bc_from_velocity(v)
     if projection is None:
-        projection = pressure.PressureProjection(grid, pressure_bc).to(v.device)
+        is_periodic = all(
+            [
+                boundaries.is_bc_periodic_boundary_conditions(pressure_bc, dim)
+                for dim in range(grid.ndim)
+            ]
+        )
+        solver = 'pseudoinverse' if is_periodic else 'cg'
+        projection = fvm.PressureProjection(grid, pressure_bc, solver=solver, dtype=v.dtype).to(v.device)
     v, _ = projection(v)
     vmax = torch.linalg.norm(torch.stack([u.data for u in v]), dim=0).max()
     v = GridVariableVector(

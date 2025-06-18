@@ -25,6 +25,7 @@ from torch_cfd import grids
 
 Grid = grids.Grid
 GridVariable = grids.GridVariable
+GridVariableVector = grids.GridVariableVector
 
 
 def forcing_eval(eval_func):
@@ -79,7 +80,7 @@ class ForcingFn(nn.Module):
     def __init__(
         self,
         grid: Grid,
-        scale: float = 1,
+        scale: float = 1.0,
         wave_number: int = 1,
         diam: float = 1.0,
         swap_xy: bool = False,
@@ -100,12 +101,12 @@ class ForcingFn(nn.Module):
 
     @forcing_eval
     def velocity_eval(
-        grid: Grid, velocity: Optional[Tuple[torch.Tensor, torch.Tensor]]
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        self, grid: Grid, velocity: Optional[Tuple[GridVariable, GridVariable]]
+    ) -> GridVariableVector:
         raise NotImplementedError
 
     @forcing_eval
-    def vorticity_eval(grid: Grid, vorticity: Optional[torch.Tensor]) -> torch.Tensor:
+    def vorticity_eval(self, grid: Grid, vorticity: Optional[torch.Tensor]) -> GridVariable:
         raise NotImplementedError
 
     def forward(
@@ -113,7 +114,7 @@ class ForcingFn(nn.Module):
         grid: Optional[Union[Grid, Tuple[Grid, Grid]]] = None,
         velocity: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
         vorticity: Optional[torch.Tensor] = None,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+    ) -> Union[GridVariable, GridVariableVector]:
         if not self.vorticity:
             return self.velocity_eval(grid, velocity)
         else:
@@ -166,7 +167,7 @@ class KolmogorovForcing(ForcingFn):
         self,
         grid: Optional[Grid],
         velocity: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+    ) -> GridVariableVector:
         offsets = self.offsets
         grid = self.grid if grid is None else grid
         domain_factor = 2 * torch.pi / self.diam
@@ -187,13 +188,13 @@ class KolmogorovForcing(ForcingFn):
                 grid,
             )
             v = GridVariable(torch.zeros_like(u.data), (1 / 2, 1), grid)
-        return tuple((u, v))
+        return GridVariableVector(tuple((u, v)))
 
     def vorticity_eval(
         self,
         grid: Optional[Grid],
         vorticity: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
+    ) -> GridVariable:
         offsets = self.offsets
         grid = self.grid if grid is None else grid
         domain_factor = 2 * torch.pi / self.diam
@@ -243,9 +244,9 @@ class SimpleSolenoidalForcing(ForcingFn):
 
     def __init__(
         self,
-        scale=1,
+        scale=1.0,
         diam=1.0,
-        k=1.0,
+        wave_number=1,
         offsets=((0, 0), (0, 0)),
         vorticity=True,
         *args,
@@ -255,7 +256,7 @@ class SimpleSolenoidalForcing(ForcingFn):
             *args,
             scale=scale,
             diam=diam,
-            wave_number=k,
+            wave_number=wave_number,
             offsets=offsets,
             vorticity=vorticity,
             **kwargs,
@@ -273,7 +274,7 @@ class SimpleSolenoidalForcing(ForcingFn):
         self,
         grid: Optional[Grid],
         velocity: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+    ) -> GridVariableVector:
         offsets = self.offsets
         grid = self.grid if grid is None else grid
         domain_factor = 2 * torch.pi / self.diam
@@ -292,7 +293,7 @@ class SimpleSolenoidalForcing(ForcingFn):
             rot = self.potential(x, y, scale, k)
             u = GridVariable(rot, offsets[0], grid)
             v = GridVariable(-rot, (1 / 2, 1), grid)
-        return tuple((u, v))
+        return GridVariableVector(tuple((u, v)))
 
     def vorticity_eval(
         self,
@@ -339,7 +340,7 @@ class SinCosForcing(SimpleSolenoidalForcing):
         self,
         scale=0.1,
         diam=1.0,
-        k=1.0,
+        wave_number=1,
         offsets=((0, 0), (0, 0)),
         *args,
         **kwargs,
@@ -348,7 +349,7 @@ class SinCosForcing(SimpleSolenoidalForcing):
             *args,
             scale=scale,
             diam=diam,
-            k=k,
+            wave_number=wave_number,
             offsets=offsets,
             **kwargs,
         )

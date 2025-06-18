@@ -282,6 +282,9 @@ class AdvectAligned(nn.Module):
         flux = GridVariableVector(tuple(c * u for c, u in zip(cs, v)))
 
         # wrap flux with boundary conditions to flux if not periodic
+        # flux = GridVariableVector(
+        #         tuple(bc.impose_bc(f) for f, bc in zip(flux, self.flux_bcs))
+        #     )
         flux = GridVariableVector(tuple(GridVariable(f.data, offset, f.grid, bc) for f, offset, bc in zip(flux, self.offsets, self.flux_bcs)))
         
 
