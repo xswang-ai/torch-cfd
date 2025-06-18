@@ -592,7 +592,7 @@ class GridVariable(GridTensorOpsMixin):
 
     def norm(self, p: Optional[Union[int, float]] = None, **kwargs) -> torch.Tensor:
         """Returns the norm of the data."""
-        return torch.linalg.norm(self.data, ord=p, **kwargs)
+        return torch.linalg.norm(self.data, p, **kwargs)
 
     @property
     def L2norm(self) -> torch.Tensor:
@@ -613,11 +613,18 @@ class GridVariable(GridTensorOpsMixin):
     def __getitem__(self, index):
         """Allows indexing into the GridVariable like a tensor."""
         # This is necessary to ensure that the offset and grid are preserved
-        # when slicing the data.
+        # when slicing the data, bc will be removed.
         new_data = self.data[index]
         if isinstance(new_data, torch.Tensor):
-            return GridVariable(new_data, self.offset, self.grid, self.bc)
+            return GridVariable(new_data, self.offset, self.grid)
         return new_data
+
+    def __setitem__(self, index, value):
+        """Allows setting items in the GridVariable like a tensor."""
+        if isinstance(value, GridVariable):
+            self.data[index] = value.data
+        else:
+            self.data[index] = value
 
     @staticmethod
     def is_torch_fft_func(func):

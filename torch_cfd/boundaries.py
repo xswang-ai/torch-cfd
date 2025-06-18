@@ -384,7 +384,7 @@ class ConstantBoundaryConditions(BoundaryConditions):
                     )
         return GridVariable(u.data, u.offset, u.grid, self)
 
-    def impose_bc(self, u: GridVariable, mode: str="") -> GridVariable:
+    def impose_bc(self, u: GridVariable, mode: str = "") -> GridVariable:
         """Returns GridVariable with correct boundary condition.
 
         Some grid points of GridVariable might coincide with boundary. This ensures
@@ -435,10 +435,30 @@ def is_bc_periodic_boundary_conditions(bc: BoundaryConditions, dim: int) -> bool
         )
     return True
 
+def is_bc_all_periodic_boundary_conditions(bc: BoundaryConditions) -> bool:
+    """Returns true if scalar has periodic bc along all axes."""
+    for dim in range(bc.ndim):
+        if not is_bc_periodic_boundary_conditions(bc, dim):
+            return False
+    return True
+
 
 def is_periodic_boundary_conditions(c: GridVariable, dim: int) -> bool:
     """Returns true if scalar has periodic bc along axis."""
     return is_bc_periodic_boundary_conditions(c.bc, dim)
+
+
+def is_bc_pure_neumann_boundary_conditions(bc: BoundaryConditions) -> bool:
+    """Returns true if scalar has pure Neumann bc along all axes."""
+    for dim in range(bc.ndim):
+        if bc.types[dim][0] != BCType.NEUMANN or bc.types[dim][1] != BCType.NEUMANN:
+            return False
+    return True
+
+
+def is_pure_neumann_boundary_conditions(c: GridVariable) -> bool:
+    """Returns true if scalar has pure Neumann bc along all axes."""
+    return is_bc_pure_neumann_boundary_conditions(c.bc)
 
 
 # Convenience utilities to ease updating of BoundaryConditions implementation
