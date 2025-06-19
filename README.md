@@ -3,20 +3,16 @@
 
 ![A decaying turbulence (McWilliams 1984)](examples/McWilliams2d.svg)
 
-## Summary 
-
-This repository contains mainly two parts:
-
-### Part I: a native PyTorch port of [Google's Computational Fluid Dynamics package in Jax](https://github.com/google/jax-cfd)
-The main changes are documented in the `README.md` under the [`torch_cfd` directory](./torch_cfd/). The most significant changes in all routines include:
+## A native PyTorch port of [Google's Computational Fluid Dynamics package in Jax](https://github.com/google/jax-cfd)
+This port is a good pedagogical tool to learn how to implement traditional numerical solvers using modern deep learning software interfaces. The main changes are documented in the [`torch_cfd` directory](./torch_cfd/). The most significant changes in all routines include:
   - Supports for nonhomogenous boundary conditions, many routines in Jax-CFD only work with only periodic boundary.
   - Routines that rely on the functional programming of Jax have been rewritten to be the PyTorch's tensor-in-tensor-out style, which is arguably more user-friendly to debugging as one can view intermediate values in tensors in VS Code debugger, opposed to Jax's `JaxprTrace`.
   - All operations take into consideration the batch dimension of tensors `(b, *, n, m)` regardless of `*` dimension, for example, `(b, T, C, n, m)`, which is similar to PyTorch behavior. In the original Jax-CFD package, only a single trajectory is implemented. The stencil operators are changed to generally operate from the last dimension using negative indexing, following `torch.nn.functional.pad`'s behavior.
   - Functions and operators are in general implemented as `nn.Module` like a factory template.
-  - Jax-CFD's `funcutils.trajectory` function supports tracking only one field variable (vorticity or velocity). in Torch-CFD, extra fields computation and tracking are more accessible and easier for user to add, such as time derivatives $\partial_t\mathbf{u}_h$ and PDE residual $R(\mathbf{u}_h):=\mathbf{f}-\partial_t \mathbf{u}_h-(\mathbf{u}_h\cdot\nabla)\mathbf{u}_h + \nu \Delta \mathbf{u}_h$.
+  - Jax-CFD's `funcutils.trajectory` function supports tracking only one field variable (vorticity or velocity). In Torch-CFD, extra fields computation and tracking are more accessible and easier for user to add, such as time derivatives $\partial_t\mathbf{u}_h$ and PDE residual $R(\mathbf{u}_h):=\mathbf{f}-\partial_t \mathbf{u}_h-(\mathbf{u}_h\cdot\nabla)\mathbf{u}_h + \nu \Delta \mathbf{u}_h$.
 
 
-### Part II: Spectral-Refiner: Neural Operator-Assisted Navier-Stokes Equations simulator.
+## Neural Operator-Assisted Navier-Stokes Equations simulator.
   - The **Spatiotemporal Fourier Neural Operator** (SFNO) is a spacetime tensor-to-tensor learner (or trajectory-to-trajectory), available in the [`fno` directory](./fno). Different components of FNO have been re-implemented keeping the conciseness of the original implementation while allowing modern expansions. We draw inspiration from the [3D FNO in Nvidia's Neural Operator repo](https://github.com/neuraloperator/neuraloperator), [Transformers-based neural operators](https://github.com/thuml/Neural-Solver-Library), as well as Temam's book on functional analysis for the NSE. 
   - Major architectural changes: learnable spatiotemporal positional encodings, layernorm to replace a hard-coded global Gaussian normalizer, and many others. For more details please see [the documentation of the `SFNO` class](./fno/sfno.py#L485). 
   - Data generation for the meta-example of the isotropic turbulence in [McWilliams1984]. After the warmup phase, the energy spectra match the inverse cascade of Kolmogorov flow in a periodic box.
@@ -62,9 +58,10 @@ The Apache 2.0 License in the root folder applies to the `torch-cfd` folder of t
 ## Contributions
 PR welcome. Currently, the port of `torch-cfd` currently includes:
 - The pseudospectral method for vorticity uses anti-aliasing filtering techniques for nonlinear terms to maintain stability.
-- The finite volume method on a MAC grid for velocity, and using the projection scheme to impose the divergence free condition.
-- Temporal discretization: Currently only RK4-family of marching schemes uses explicit time-stepping for advection, either implicit or explicit time-stepping for diffusion.
-- Boundary conditions: only periodic and Dirichlet boundary conditions.
+- The finite volume method on a MAC grids for velocity, and using the projection scheme to impose the divergence free condition.
+- Temporal discretization: Currently it has only single-step RK4-family schemes uses explicit time-stepping for advection, either implicit or explicit time-stepping for diffusion.
+- Boundary conditions: only periodic and Dirichlet boundary conditions for velocity, Neumann boundary for pressure.
+- Solvers: pseudoinverse (either FFT-based or SVD based), Jacobi- or Multigrid V-cycle-preconditioned Conjugate gradient.
 
 ## Reference
 

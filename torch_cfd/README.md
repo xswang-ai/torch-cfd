@@ -5,25 +5,31 @@
 - [x] add native FFT-based vorticity computation, instead of taking finite differences for pseudo-spectral (added in 0.0.4).
 - [x] add native PyTorch implementation for applying `torch.linalg` and `torch.fft` function directly on `GridArray` and `GridVariable` (added 0.1.0).
 - [x] add no-slip boundary (added in 0.2.2).
+- [ ] rewrite `shift` and `pad` using `torch.roll`.
 - [ ] support for function-valued boundary conditions.
+- [ ] change the multigrid implementation using convolution kernel.
 
 # Changelog
 
+### 0.2.4
+- Added native implementation of Conjugate gradient, Gauss-Seidel smoothers, and a hard-coded implementation of multigrid in `solvers.py`. Reference: [Long Chen's notes on finite difference methods](https://www.math.uci.edu/~chenlong/226/FDMcode.pdf) and [programming multigrid method on MAC grids](https://www.math.uci.edu/~chenlong/226/MACcode.pdf).
+- Added `test_solvers.py`.
+
 ### 0.2.3
-- Major fixes: Jax-CFD routines that does not work for non-homogeneous boundary conditions are rewritten:
+- Major fixes: Jax-CFD routines that do not work for non-homogeneous boundary conditions are rewritten:
   - removed wrapping $\partial v/\partial t$ with $v$'s boundary condition (`explicit_terms_with_same_bcs` routine, which is wrong for nonhomogeneous bcs). 
   - changed `pad` function to work with tuple padding inputs.
   - fixed `pad` behavior on `offset==1.5` functions.
-  - fixed `bc.pad_all` behavior.`
-  - added a [`_symmetric_pad_tensor`](./grids.py#1348) function to match the behavior of `np.pad` with mode `symmetric` (symmetric padding across the boundary, not just mirror).
-  - changd the behavior of `pad_and_impose_bc` in `BoundaryCondition` class to correctly impose bc when ghost cells have to be presented, and added some tests.
-- advection module is completely refactored to as `nn.Module`, tests added for advection.
+  - fixed `bc.pad_all` behavior.
+  - added a [`_symmetric_pad_tensor`](./grids.py#1348) function in PyTorch to match the behavior of `np.pad` with mode `symmetric` (symmetric padding across the boundary, not just mirror).
+  - changed the behavior of `pad_and_impose_bc` in `BoundaryCondition` class to correctly impose bc when ghost cells have to be presented, and added some tests.
+- `torch_cfd.advection` module is completely refactored to as `nn.Module`, tests added for advection.
 - added `.norm` property and `__getitem__` for a `GridVariable`.
 - added `__repr__` for `Grid` and `GridVariable` for neater format when being printed.
 
 ### 0.2.0
 
-After version `0.1.0`, I began prompt with existing codes in VSCode Copilot (using the OpenAI Enterprise API kindedly provided by UM), which arguably significantly improve the "porting->debugging->refactoring" cycle. I recorded some several good refactoring suggestions by GPT o4-mini and some by ***Claude Sonnet 3.7*** here. There were definitely over-complicated "poor" refactoring suggestions, which have been stashed after benchmarking. I found that Sonnet 3.7 is exceptionally good at providing templates for me to filling the details, when it is properly prompted with details of the functionality of current codes. Another highlight is that, based on the error or exception raised in the unittests, Sonnet 3.7 directly added configurations in `.vscode/launch.json`, saving me quite some time of copy-paste boilerplates then change by hand.
+After version `0.1.0`, I began prompt with existing codes in VSCode Copilot (using the OpenAI Enterprise API kindly provided by UM), which arguably significantly improve the "porting->debugging->refactoring" cycle. I recorded some several good refactoring suggestions by GPT o4-mini and some by ***Claude Sonnet 3.7*** here. There were definitely over-complicated "poor" refactoring suggestions, which have been stashed after benchmarking. I found that Sonnet 3.7 is exceptionally good at providing templates for me to filling the details, when it is properly prompted with details of the functionality of current codes. Another highlight is that, based on the error or exception raised in the unittests, Sonnet 3.7 directly added configurations in `.vscode/launch.json`, saving me quite some time of copy-paste boilerplates then change by hand.
 
 #### Major change: batch dimension for FVM
 The finite volume solver now accepts the batch dimension, some key updates include
