@@ -36,17 +36,41 @@ Example:
 
 import math
 import typing
-from typing import Any, List, Optional, Sequence, Tuple, Union
+from typing import List, Optional, Sequence, Tuple, Union
 from functools import reduce
 import operator
 import torch
 from torch_cfd import boundaries, grids
 
-ArrayVector = List[torch.Tensor]
+TensorList = Sequence[torch.Tensor]
 GridVariable = grids.GridVariable
 GridTensor = grids.GridTensor
 GridVariableVector = Union[grids.GridVariableVector, Sequence[grids.GridVariable]]
 
+def trim_boundary(u):
+    # fixed jax-cfd bug that trims all dimension for a batched GridVariable
+    if isinstance(u, grids.GridVariable):
+        trimmed_slices = ()
+        for dim in range(-u.grid.ndim, 0):
+            if u.offset[dim] == 0:
+                trimmed_slice = slice(1, None)
+            elif u.offset[dim] == 1:
+                trimmed_slice = slice(None, -1)
+            elif u.offset[dim] == 0.5:
+                trimmed_slice = slice(1, -1)
+            elif u.offset[dim] < 0:
+                trimmed = math.floor(u.offset[dim])
+                trimmed_slice = slice(-trimmed, None)
+            elif u.offset[dim] > 1:
+                trimmed = math.floor(u.offset[dim])
+                trimmed_slice = slice(None, -trimmed)
+            trimmed_slices += (trimmed_slice,)
+        data = u.data[(..., *trimmed_slices)]
+        return grids.GridVariable(data, u.offset, u.grid)
+    else:
+        u = torch.as_tensor(u)
+        trimmed_slices = (slice(1, -1),) * u.ndim
+        return u[(..., *trimmed_slices)]
 
 def stencil_sum(*arrays: GridVariable, return_tensor=False) -> Union[GridVariable, torch.Tensor]:
     """
@@ -160,7 +184,7 @@ def set_laplacian_matrix(
     bc: boundaries.BoundaryConditions,
     device: Optional[torch.device] = None,
     dtype: torch.dtype = torch.float32,
-) -> ArrayVector:
+) -> TensorList:
     """Initialize the Laplacian operators."""
 
     offset = grid.cell_center
@@ -198,7 +222,7 @@ def laplacian_matrix(n: int, step: float, sparse: bool = False, dtype=torch.floa
 
 
 def _laplacian_boundary_dirichlet_cell_centered(
-    laplacians: ArrayVector, grid: grids.Grid, dim: int, side: str
+    laplacians: TensorList, grid: grids.Grid, dim: int, side: str
 ) -> None:
     """Converts 1d laplacian matrix to satisfy dirichlet homogeneous bc.
 
@@ -251,7 +275,7 @@ def _laplacian_boundary_dirichlet_cell_centered(
 
 
 def _laplacian_boundary_neumann_cell_centered(
-    laplacians: ArrayVector, grid: grids.Grid, dim: int, side: str
+    laplacians: TensorList, grid: grids.Grid, dim: int, side: str
 ) -> None:
     """Converts 1d laplacian matrix to satisfy neumann homogeneous bc.
 
@@ -287,11 +311,11 @@ def laplacian_matrix_w_boundaries(
     grid: grids.Grid,
     offset: Tuple[float, ...],
     bc: grids.BoundaryConditions,
-    laplacians: Optional[ArrayVector] = None,
+    laplacians: Optional[TensorList] = None,
     device: Optional[torch.device] = None,
     dtype: torch.dtype = torch.float32,
     sparse: bool = False,
-) -> ArrayVector:
+) -> TensorList:
     """Returns 1d laplacians that satisfy boundary conditions bc on grid.
 
     Given grid, offset and boundary conditions, returns a list of 1 laplacians
