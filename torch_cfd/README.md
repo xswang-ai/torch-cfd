@@ -6,10 +6,15 @@
 - [x] add native PyTorch implementation for applying `torch.linalg` and `torch.fft` function directly on `GridArray` and `GridVariable` (added 0.1.0).
 - [x] add no-slip boundary (added in 0.2.2).
 - [ ] rewrite `shift` and `pad` using `torch.roll`.
-- [ ] support for function-valued boundary conditions.
+- [x] support for function-valued boundary conditions.
 - [ ] change the multigrid implementation using convolution kernel.
 
 # Changelog
+
+### 0.2.5
+- Added two classes that support array-valued or function-valued boundary conditions, while back-compatible with previous single-constant bcs. 
+- Fixed the `slice(1, -1)` from the original Jax-CFD pytests to the corresponding offset in each dimension. 
+- Fixed Jax-CFD's Laplacian computation for Dirichlet boundary condition in which a variable needs ghost cells beyond the boundary.
 
 ### 0.2.4
 - Added native implementation of Conjugate gradient, Gauss-Seidel smoothers, and a hard-coded implementation of multigrid in `solvers.py`. Reference: [Long Chen's notes on finite difference methods](https://www.math.uci.edu/~chenlong/226/FDMcode.pdf) and [programming multigrid method on MAC grids](https://www.math.uci.edu/~chenlong/226/MACcode.pdf).

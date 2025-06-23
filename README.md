@@ -5,11 +5,11 @@
 
 ## A native PyTorch port of [Google's Computational Fluid Dynamics package in Jax](https://github.com/google/jax-cfd)
 This port is a good pedagogical tool to learn how to implement traditional numerical solvers using modern deep learning software interfaces. The main changes are documented in the [`torch_cfd` directory](./torch_cfd/). The most significant changes in all routines include:
-  - Supports for nonhomogenous boundary conditions, many routines in Jax-CFD only work with only periodic boundary.
-  - Routines that rely on the functional programming of Jax have been rewritten to be the PyTorch's tensor-in-tensor-out style, which is arguably more user-friendly to debugging as one can view intermediate values in tensors in VS Code debugger, opposed to Jax's `JaxprTrace`.
-  - All operations take into consideration the batch dimension of tensors `(b, *, n, m)` regardless of `*` dimension, for example, `(b, T, C, n, m)`, which is similar to PyTorch behavior. In the original Jax-CFD package, only a single trajectory is implemented. The stencil operators are changed to generally operate from the last dimension using negative indexing, following `torch.nn.functional.pad`'s behavior.
-  - Functions and operators are in general implemented as `nn.Module` like a factory template.
-  - Jax-CFD's `funcutils.trajectory` function supports tracking only one field variable (vorticity or velocity). In Torch-CFD, extra fields computation and tracking are more accessible and easier for user to add, such as time derivatives $\partial_t\mathbf{u}_h$ and PDE residual $R(\mathbf{u}_h):=\mathbf{f}-\partial_t \mathbf{u}_h-(\mathbf{u}_h\cdot\nabla)\mathbf{u}_h + \nu \Delta \mathbf{u}_h$.
+  - (**enhanced**) Nonhomogenous boundary conditions support: the user can provide array-valued or function-valued bcs. Many routines in Jax-CFD only work with only periodic or constant boundary.
+  - (**changed**) Routines that rely on the functional programming of Jax have been rewritten to be the PyTorch's tensor-in-tensor-out style, which is arguably more user-friendly to debugging as one can view intermediate values in tensors in VS Code debugger, opposed to Jax's `JaxprTrace`.
+  - (**enhanced**) Batch-dimension: all operations take into consideration the batch dimension of tensors `(b, *, n, m)` regardless of `*` dimension, for example, `(b, T, C, n, m)`, which is similar to PyTorch behavior. In the original Jax-CFD package, only a single trajectory is implemented. The stencil operators are changed to generally operate from the last dimension using negative indexing, following `torch.nn.functional.pad`'s behavior.
+  - (**changed**) Neural Network interface: functions and operators are in general implemented as `nn.Module` like a factory template.
+  - (**enhanced**) Jax-CFD's `funcutils.trajectory` function supports tracking only one field variable (vorticity or velocity). In Torch-CFD, extra fields computation and tracking are more accessible and easier for user to add, such as time derivatives $\partial_t\mathbf{u}_h$ and PDE residual $R(\mathbf{u}_h):=\mathbf{f}-\partial_t \mathbf{u}_h-(\mathbf{u}_h\cdot\nabla)\mathbf{u}_h + \nu \Delta \mathbf{u}_h$.
 
 
 ## Neural Operator-Assisted Navier-Stokes Equations simulator.
@@ -60,7 +60,7 @@ PR welcome. Currently, the port of `torch-cfd` currently includes:
 - The pseudospectral method for vorticity uses anti-aliasing filtering techniques for nonlinear terms to maintain stability.
 - The finite volume method on a MAC grids for velocity, and using the projection scheme to impose the divergence free condition.
 - Temporal discretization: Currently it has only single-step RK4-family schemes uses explicit time-stepping for advection, either implicit or explicit time-stepping for diffusion.
-- Boundary conditions: only periodic and Dirichlet boundary conditions for velocity, Neumann boundary for pressure.
+- Boundary conditions: periodic and Dirichlet boundary conditions for velocity, Neumann boundary for pressure.
 - Solvers: pseudoinverse (either FFT-based or SVD based), Jacobi- or Multigrid V-cycle-preconditioned Conjugate gradient.
 
 ## Reference
