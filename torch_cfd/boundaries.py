@@ -18,7 +18,7 @@
 
 import dataclasses
 import math
-from typing import Optional, Sequence, Tuple, Union
+from typing import Callable, List, Optional, Sequence, Tuple, Union
 
 import torch
 
@@ -32,6 +32,7 @@ GridVariableVector = grids.GridVariableVector
 
 BCType = grids.BCType()
 Padding = grids.Padding()
+BCValues = grids.BCValues
 
 
 @dataclasses.dataclass(init=False, frozen=True, repr=False)
@@ -57,6 +58,7 @@ class ConstantBoundaryConditions(BoundaryConditions):
 
     _types: Tuple[Tuple[str, str], ...]
     bc_values: Tuple[Tuple[Optional[float], Optional[float]], ...]
+    ndim: int
 
     def __init__(
         self,
@@ -226,7 +228,7 @@ class ConstantBoundaryConditions(BoundaryConditions):
         """Pads along all axes with pad width specified by width tuple.
 
         Args:
-          u: a `GridArray` object.
+          u: a `GridVariable` object.
           width: Tuple of padding width for each side for each axis.
           mode: type of padding to use in non-periodic case.
             Mirror mirrors the array values across the boundary.
@@ -260,8 +262,14 @@ class ConstantBoundaryConditions(BoundaryConditions):
             value = self.bc_values[dim][-i]
             if value is None:
                 bc.append(None)
-            else:
+            elif isinstance(value, float):
                 bc.append(torch.full(grid.shape[:dim] + grid.shape[dim + 1 :], value))
+            elif isinstance(value, torch.Tensor):
+                if value.shape != grid.shape[:dim] + grid.shape[dim + 1 :]:
+                    raise ValueError(
+                        f"Boundary value shape {value.shape} does not match expected shape {grid.shape[:dim] + grid.shape[dim + 1 :]}"
+                    )
+                bc.append(value)
 
         return tuple(bc)
 
@@ -393,7 +401,10 @@ class ConstantBoundaryConditions(BoundaryConditions):
         u: a `GridVariable` object.
 
         Returns:
-        A GridVariable that has correct boundary values. If ghost_cell == True, then ghost cells are added on the other side of DoFs living at cell center if the bc is Dirichlet or Neumann.
+        A GridVariable that has correct boundary values.
+
+        Notes:
+        If one needs ghost_cells, please use a manual function pad_all to add ghost cells are added on the other side of DoFs living at cell center if the bc is Dirichlet or Neumann.
         """
         offset = u.offset
         u = self.trim_boundary(u)
@@ -434,6 +445,7 @@ def is_bc_periodic_boundary_conditions(bc: BoundaryConditions, dim: int) -> bool
             "periodic boundary conditions must be the same on both sides of the axis"
         )
     return True
+
 
 def is_bc_all_periodic_boundary_conditions(bc: BoundaryConditions) -> bool:
     """Returns true if scalar has periodic bc along all axes."""
@@ -559,6 +571,487 @@ def periodic_and_neumann_boundary_conditions(
         )
 
 
+@dataclasses.dataclass(init=False, frozen=True, repr=False)
+class DiscreteBoundaryConditions(ConstantBoundaryConditions):
+    """Boundary conditions that can vary spatially along the boundary.
+
+    Array-based values that are evaluated at boundary nodes with proper offsets. The values must match a variable's offset in order that the numerical differentiation is correct.
+
+    Attributes:
+        types: boundary condition types for each dimension
+        bc_values: boundary values that can be:
+            - torch.Tensor: precomputed values along boundary
+            - None: homogeneous boundary condition
+
+    Example usage:
+        # Array-based boundary conditions
+        grid = Grid((10, 20))
+        x_boundary = torch.linspace(0, 1, 20)  # values along y-axis
+        y_boundary = torch.sin(torch.linspace(0, 2*np.pi, 10))  # values along x-axis
+
+        bc = VariableBoundaryConditions(
+            types=((BCType.DIRICHLET, BCType.DIRICHLET),
+                   (BCType.NEUMANN, BCType.DIRICHLET)),
+            values=((y_boundary, y_boundary),  # left/right boundaries
+                    (None, x_boundary))        # bottom/top boundaries
+        )
+    """
+
+    _types: Tuple[Tuple[str, str], ...]
+    _bc_values: Tuple[Tuple[Union[float, BCValues], Union[float, BCValues]], ...]
+    ndim: int  # default 2d, dataclass init=False
+
+    def __init__(
+        self,
+        types: Sequence[Tuple[str, str]],
+        values: Sequence[
+            Tuple[
+                Union[float, BCValues],
+                Union[float, BCValues],
+            ]
+        ],
+    ):
+        types = tuple(types)
+        values = tuple(values)
+        object.__setattr__(self, "_types", types)
+        object.__setattr__(self, "_bc_values", values)
+        object.__setattr__(self, "ndim", len(types))
+
+    @property
+    def has_callable(self) -> bool:
+        """Check if any boundary values are callable functions."""
+        for dim in range(self.ndim):
+            for side in range(2):
+                if callable(self._bc_values[dim][side]):
+                    return True
+        return False
+
+    def _validate_boundary_arrays_with_grid(self, grid: Grid):
+        """Validate boundary arrays against grid dimensions."""
+        for dim in range(self.ndim):
+            for side in range(2):
+                value = self._bc_values[dim][side]
+                if isinstance(value, torch.Tensor):
+                    # Calculate expected boundary shape
+                    expected_shape = grid.shape[:dim] + grid.shape[dim + 1 :]
+                    if len(expected_shape) == 0:
+                        # 1D case - boundary is a scalar
+                        if value.numel() != 1:
+                            raise ValueError(
+                                f"Boundary array for 1D grid at dim {dim}, side {side} "
+                                f"should be a scalar, got shape {value.shape}"
+                            )
+                    elif value.ndim == self.ndim-1 and value.shape != expected_shape:
+                        raise ValueError(
+                            f"Boundary array for dim {dim}, side {side} has shape "
+                            f"{value.shape}, expected {expected_shape}"
+                        )
+
+    @property
+    def bc_values(
+        self,
+    ) -> Sequence[Tuple[Optional[BCValues], Optional[BCValues]]]:
+        """Returns boundary values as tensors for each boundary.
+
+        For callable boundary conditions, this will raise an error asking the user
+        to use FunctionBoundaryConditions instead.
+        For float boundary conditions, returns tensors with the constant value.
+        For tensor boundary conditions, returns them as-is.
+        For None, returns None.
+        """
+        if self.has_callable:
+            raise ValueError(
+                "Callable boundary conditions detected. Please use "
+                "FunctionBoundaryConditions class for callable boundary conditions."
+            )
+
+        # Process non-callable values
+        result = []
+        for dim in range(self.ndim):
+            dim_values = []
+            for side in range(2):
+                value = self._bc_values[dim][side]
+                if value is None:
+                    dim_values.append(None)
+                elif isinstance(value, torch.Tensor):
+                    dim_values.append(value)
+                elif isinstance(value, (int, float)):
+                    # Return scalar tensor for float values
+                    dim_values.append(torch.tensor(float(value)))
+                else:
+                    raise ValueError(f"Unsupported boundary value type: {type(value)}")
+            result.append(tuple(dim_values))
+        return tuple(result)
+
+    def __repr__(self) -> str:
+        try:
+            lines = [f"VariableBoundaryConditions({self.ndim}D):"]
+
+            for dim in range(self.ndim):
+                lower_type, upper_type = self.types[dim]
+                lower_val, upper_val = self._bc_values[dim]
+
+                # Format values based on type
+                def format_value(val):
+                    if val is None:
+                        return "None"
+                    elif isinstance(val, torch.Tensor):
+                        return f"Tensor{tuple(val.shape)}"
+                    elif callable(val):
+                        return f"Callable({val.__name__ if hasattr(val, '__name__') else 'lambda'})"
+                    else:
+                        return str(val)
+
+                lower_val_str = format_value(lower_val)
+                upper_val_str = format_value(upper_val)
+
+                lines.append(
+                    f"  dim {dim}: [{lower_type}({lower_val_str}), {upper_type}({upper_val_str})]"
+                )
+
+            return "\n".join(lines)
+        except Exception as e:
+            return f"VariableBoundaryConditions not initialized: {e}"
+
+    def clone(
+        self,
+        types: Optional[Sequence[Tuple[str, str]]] = None,
+        values: Optional[
+            Sequence[
+                Tuple[
+                    BCValues,
+                    BCValues,
+                ]
+            ]
+        ] = None,
+    ) -> BoundaryConditions:
+        """Creates a copy with optionally modified parameters."""
+        new_types = types if types is not None else self.types
+        new_values = values if values is not None else self._bc_values
+        return DiscreteBoundaryConditions(new_types, new_values)
+
+    def _boundary_slices(
+        self, offset: Tuple[float, ...]
+    ) -> Tuple[Tuple[Optional[slice], Optional[slice]], ...]:
+        """Returns slices for boundary values after considering trimming effects.
+
+        When a GridVariable with certain offsets gets trimmed, the boundary coordinates
+        need to be sliced accordingly to match the trimmed interior data.
+        Currently, this only works for 2D grids (spatially the variable lives on a 2D grid, i.e., good for 2D+time+channel variables).
+
+        Args:
+            offset: The offset of the GridVariable
+            grid: The grid associated with the GridVariable
+
+        Returns:
+            A tuple of (lower_slice, upper_slice) for each dimension, where each slice
+            indicates how to index the boundary values for that dimension and side.
+            (None, None) means no slicing needed (use full boundary array).
+        """
+        if self.ndim > 2:
+            raise NotImplementedError(
+                "Multi-dimensional boundary slicing not implemented"
+            )
+        if len(offset) != self.ndim:
+            raise ValueError(
+                f"Offset length {len(offset)} doesn't match number of sets of boundary edges {self.ndim}"
+            )
+
+        # Initialize with default "no slicing" tuples
+        slices: List[Tuple[Optional[slice], Optional[slice]]] = [
+            (None, None),
+            (None, None),
+        ]
+
+        for dim in range(self.ndim):
+            other_dim = dim ^ 1  # flip the bits to get the other dimension index
+            trimmed_lower = math.isclose(offset[dim], 0.0)
+            trimmed_upper = math.isclose(offset[dim], 1.0)
+
+            assert not (
+                trimmed_lower and trimmed_upper
+            ), "MAC grids cannot ahve both lower and upper trimmed for bc."
+            if trimmed_lower:
+                slices[other_dim] = (slice(1, None), slice(1, None))
+            elif trimmed_upper:
+                slices[other_dim] = (slice(None, -1), slice(None, -1))
+            # else: keep the default (None, None)
+
+        return tuple(slices)
+
+    def _boundary_mesh(
+        self,
+        dim: int,
+        grid: Grid,
+        offset: Tuple[float, ...],
+    ) -> Tuple[Tuple[torch.Tensor, ...], Tuple[torch.Tensor, ...]]:
+        """Get coordinate arrays for boundary points along dimension dim."""
+        # Use the Grid's boundary_mesh method and return coordinates for lower boundary
+        # (both lower and upper have same coordinate structure for the boundary points)
+        return grid.boundary_mesh(dim, offset)
+
+    def pad_and_impose_bc(
+        self,
+        u: GridVariable,
+        offset_to_pad_to: Optional[Tuple[float, ...]] = None,
+        mode: Optional[str] = "",
+    ) -> GridVariable:
+        """Pad and impose variable boundary conditions."""
+        assert u.bc is None, "u must be trimmed before padding and imposing bc."
+        if offset_to_pad_to is None:
+            offset_to_pad_to = u.offset
+
+        bc_values = self.bc_values
+        boundary_slices = self._boundary_slices(offset_to_pad_to)
+        x_boundary_slice = boundary_slices[-2]
+
+        if not all(s is None for s in x_boundary_slice):
+            # Apply slicing to boundary values
+            new_bc_values = list(list(v) for v in bc_values)
+            for i in range(2):
+                if bc_values[-2][i] is not None:
+                    if bc_values[-2][i].ndim > 0:
+                        new_bc_values[-2][i] = bc_values[-2][i][x_boundary_slice[i]]
+                    else:
+                        new_bc_values[-2][i] = bc_values[-2][i]
+            bc_values = new_bc_values
+
+        for dim in range(-u.grid.ndim, 0):
+            _ = self._is_aligned(u, dim)
+            if self.types[dim][0] != BCType.PERIODIC:
+                # the values passed to grids.pad should consider the offset of the variable
+                # if the offset is 1, the the trimmed variable will have the upper edge of that dimension trimmed, one only needs n-1 entries.
+                if mode:
+                    u = grids.pad(u, (1, 1), dim, self, mode=mode, values=bc_values)
+                elif self.types[dim][0] == BCType.DIRICHLET and not mode:
+                    if math.isclose(offset_to_pad_to[dim], 1.0):
+                        u = grids.pad(u, 1, dim, self, values=bc_values)
+                    elif math.isclose(offset_to_pad_to[dim], 0.0):
+                        u = grids.pad(u, -1, dim, self, values=bc_values)
+                elif self.types[dim][0] == BCType.NEUMANN and not mode:
+                    if not math.isclose(offset_to_pad_to[dim], 0.5):
+                        raise ValueError("Neumann bc is not defined on edges.")
+                else:
+                    raise NotImplementedError(
+                        f"Padding for {self.types[dim][0]} boundary conditions is not implemented."
+                    )
+
+        return GridVariable(u.data, u.offset, u.grid, self)
+
+
+@dataclasses.dataclass(init=False, frozen=True, repr=False)
+class FunctionBoundaryConditions(DiscreteBoundaryConditions):
+    """Boundary conditions defined by callable functions.
+
+    This class handles boundary conditions that are defined as functions of
+    spatial coordinates (and optionally time). The functions are automatically
+    evaluated on the boundary mesh during initialization.
+
+    Attributes:
+        types: boundary condition types for each dimension
+        _bc_values: evaluated boundary values (tensors/floats after evaluation)
+        ndim: number of spatial dimensions
+
+    Example usage:
+        # Function-based boundary conditions with individual functions
+        def left_bc(x, y):
+            return torch.sin(y)
+
+        def right_bc(x, y):
+            return torch.cos(y)
+
+        grid = Grid((10, 20))
+        bc = FunctionBoundaryConditions(
+            types=((BCType.DIRICHLET, BCType.DIRICHLET),
+                   (BCType.NEUMANN, BCType.DIRICHLET)),
+            values=((left_bc, right_bc),    # left/right boundaries
+                    (None, lambda x, y: x**2))  # bottom/top boundaries
+            grid=grid,
+            offset=(0.5, 0.5)
+        )
+
+        # Or with a single function applied to all boundaries
+        def global_bc(x, y):
+            return x + y
+
+        bc = FunctionBoundaryConditions(
+            types=((BCType.DIRICHLET, BCType.DIRICHLET),
+                   (BCType.DIRICHLET, BCType.DIRICHLET)),
+            values=global_bc,  # Single function applied everywhere
+            grid=grid,
+            offset=(0.5, 0.5)
+        )
+    """
+
+    _raw_bc_values: Tuple[
+        Tuple[
+            Union[
+                Callable[..., torch.Tensor],
+                Union[Callable[..., torch.Tensor], BCValues, float],
+            ],
+            BCValues,
+            float,
+        ],
+        ...,
+    ]
+
+    def __init__(
+        self,
+        types: Sequence[Tuple[str, str]],
+        values: Union[
+            Callable[..., torch.Tensor],  # Single function for all boundaries
+            Sequence[
+                Tuple[
+                    Union[Callable[..., torch.Tensor], BCValues, float],
+                    Union[Callable[..., torch.Tensor], BCValues, float],
+                ]
+            ],
+        ],
+        grid: Grid,
+        offset: Optional[Tuple[float, ...]] = None,
+        time: Optional[torch.Tensor] = None,
+    ):
+        """Initialize function-based boundary conditions.
+
+        Args:
+            types: boundary condition types for each dimension
+            values: boundary values that can be:
+                - Single Callable: function to apply to all boundaries
+                - Sequence of tuples: individual values per boundary that can be:
+                    - Callable: function to evaluate on boundary mesh
+                    - torch.Tensor: precomputed values along boundary
+                    - float/int: constant value
+                    - None: homogeneous boundary condition
+            grid: Grid to evaluate boundary conditions on
+            offset: Grid offset for boundary coordinate calculation
+            time: Optional time parameter for time-dependent boundary conditions
+        """
+        types = tuple(types)
+
+        # Handle single callable function case
+        if callable(values):
+            # Apply the same function to all boundaries
+            ndim = len(types)
+            values = tuple((values, values) for _ in range(ndim))
+        else:
+            values = tuple(values)
+
+        # Set basic attributes first
+        object.__setattr__(self, "_types", types)
+        object.__setattr__(self, "ndim", len(types))
+        object.__setattr__(self, "_raw_bc_values", values)
+
+        if offset is None:
+            offset = grid.cell_center
+
+        # Evaluate callable boundary conditions
+        evaluated_values = []
+
+        for dim in range(len(types)):
+            dim_values = []
+
+            # Get boundary coordinates for this dimension if needed
+            boundary_coords = None
+
+            for side in range(2):
+                value = values[dim][side]
+
+                if value is None:
+                    dim_values.append(None)
+                elif isinstance(value, torch.Tensor):
+                    dim_values.append(value)
+                elif isinstance(value, (int, float)):
+                    dim_values.append(torch.tensor(float(value)))
+                elif isinstance(value, Callable):
+                    # Get boundary coordinates if not already computed
+                    if boundary_coords is None:
+                        lower_coords, upper_coords = grid.boundary_mesh(dim, offset)
+                        boundary_coords = (lower_coords, upper_coords)
+
+                    # Evaluate callable on appropriate boundary
+                    boundary_points = boundary_coords[side]
+                    if time is not None:
+                        evaluated_value = value(*boundary_points, t=time)
+                    else:
+                        evaluated_value = value(*boundary_points)
+                    dim_values.append(evaluated_value)
+                else:
+                    raise ValueError(f"Unsupported boundary value type: {type(value)}")
+
+            evaluated_values.append(tuple(dim_values))
+
+        # Set the evaluated values
+        object.__setattr__(self, "_bc_values", tuple(evaluated_values))
+
+        # Validate the evaluated arrays
+        self._validate_boundary_arrays_with_grid(grid)
+
+    @property
+    def has_callable(self) -> bool:
+        """Always returns False since all callables are evaluated during init."""
+        return False
+
+    @property
+    def bc_values(
+        self,
+    ) -> Sequence[Tuple[Optional[BCValues], Optional[BCValues]]]:
+        """Returns boundary values as tensors for each boundary.
+
+        Since all callable functions are evaluated during initialization,
+        this property will never encounter callable values and always returns
+        the evaluated tensor/float values.
+        """
+        # Process all values (no callables should exist at this point)
+        result = []
+        for dim in range(self.ndim):
+            dim_values = []
+            for side in range(2):
+                value = self._bc_values[dim][side]
+                if value is None:
+                    dim_values.append(None)
+                elif isinstance(value, torch.Tensor):
+                    dim_values.append(value)
+                elif isinstance(value, (int, float)):
+                    # Return scalar tensor for float values
+                    dim_values.append(torch.tensor(float(value)))
+                else:
+                    raise ValueError(
+                        f"Unexpected boundary value type after evaluation: {type(value)}"
+                    )
+            result.append(tuple(dim_values))
+        return tuple(result)
+
+
+def dirichlet_boundary_conditions_nonhomogeneous(
+    ndim: int,
+    bc_values: Sequence[Tuple[BCValues, BCValues]],
+) -> DiscreteBoundaryConditions:
+    """Create variable Dirichlet boundary conditions."""
+    types = ((BCType.DIRICHLET, BCType.DIRICHLET),) * ndim
+    return DiscreteBoundaryConditions(types, bc_values)
+
+
+def neumann_boundary_conditions_nonhomogeneous(
+    ndim: int,
+    bc_values: Sequence[Tuple[BCValues, BCValues],],
+) -> DiscreteBoundaryConditions:
+    """Create variable Neumann boundary conditions."""
+    types = ((BCType.NEUMANN, BCType.NEUMANN),) * ndim
+    return DiscreteBoundaryConditions(types, bc_values)
+
+def function_boundary_conditions_nonhomogeneous(
+    ndim: int,
+    bc_function: Callable[..., torch.Tensor],
+    bc_type: str,
+    grid: Grid,
+    offset: Optional[Tuple[float, ...]] = None,
+    time: Optional[torch.Tensor] = None,
+) -> FunctionBoundaryConditions:
+    """Create function boundary conditions with the same function applied to all boundaries.
+    """
+    types = ((bc_type, bc_type),) * ndim
+    return FunctionBoundaryConditions(types, bc_function, grid, offset, time)
+
 def _count_bc_components(bc: BoundaryConditions) -> int:
     """Counts the number of components in the boundary conditions.
 
@@ -567,12 +1060,12 @@ def _count_bc_components(bc: BoundaryConditions) -> int:
     """
     count = 0
     ndim = len(bc.types)
-    for axis in range(ndim):  # ndim
-        if len(bc.types[axis]) != 2:
+    for dim in range(ndim):  # ndim
+        if len(bc.types[dim]) != 2:
             raise ValueError(
-                f"Boundary conditions for axis {axis} must have two values got {len(bc.types[axis])}."
+                f"Boundary conditions for axis {dim} must have two values got {len(bc.types[dim])}."
             )
-        count += len(bc.types[axis])
+        count += len(bc.types[dim])
     return count
 
 
@@ -612,8 +1105,8 @@ def consistent_boundary_conditions_gridvariable(
       they are consistent.
     """
     bc_types = []
-    for axis in range(arrays[0].grid.ndim):
-        bcs = {is_periodic_boundary_conditions(array, axis) for array in arrays}
+    for dim in range(arrays[0].grid.ndim):
+        bcs = {is_periodic_boundary_conditions(array, dim) for array in arrays}
         if len(bcs) != 1:
             raise Exception(f"arrays do not have consistent bc: {arrays}")
         elif bcs.pop():
@@ -660,8 +1153,8 @@ def get_pressure_bc_from_velocity(
 def has_all_periodic_boundary_conditions(*arrays: GridVariable) -> bool:
     """Returns True if arrays have periodic BC in every dimension, else False."""
     for array in arrays:
-        for axis in range(array.grid.ndim):
-            if not is_periodic_boundary_conditions(array, axis):
+        for dim in range(array.grid.ndim):
+            if not is_periodic_boundary_conditions(array, dim):
                 return False
     return True
 
@@ -723,11 +1216,11 @@ def get_advection_flux_bc_from_velocity_and_scalar_bc(
             f"Flux boundary condition is not implemented for scalar with {type(c_bc)}"
         )
 
-    for axis in range(c_bc.ndim):
-        if u_bc.types[axis][0] == BCType.PERIODIC:
+    for dim in range(c_bc.ndim):
+        if u_bc.types[dim][0] == BCType.PERIODIC:
             flux_bc_types.append((BCType.PERIODIC, BCType.PERIODIC))
             flux_bc_values.append((None, None))
-        elif flux_direction != axis:
+        elif flux_direction != dim:
             # Flux boundary condition parallel to flux direction
             # Set to homogeneous Dirichlet as it doesn't affect divergence computation
             flux_bc_types.append((BCType.DIRICHLET, BCType.DIRICHLET))
@@ -738,10 +1231,10 @@ def get_advection_flux_bc_from_velocity_and_scalar_bc(
             flux_bc_values_ax = []
 
             for i in range(2):  # lower and upper boundary
-                u_type = u_bc.types[axis][i]
-                c_type = c_bc.types[axis][i]
-                u_val = u_values[axis][i] if u_values[axis][i] is not None else 0.0
-                c_val = c_values[axis][i] if c_values[axis][i] is not None else 0.0
+                u_type = u_bc.types[dim][i]
+                c_type = c_bc.types[dim][i]
+                u_val = u_values[dim][i] if u_values[dim][i] is not None else 0.0
+                c_val = c_values[dim][i] if c_values[dim][i] is not None else 0.0
 
                 # Case 1: Dirichlet velocity with Dirichlet scalar
                 if u_type == BCType.DIRICHLET and c_type == BCType.DIRICHLET:

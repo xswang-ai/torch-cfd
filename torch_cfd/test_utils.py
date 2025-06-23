@@ -62,12 +62,38 @@ class TestCase(parameterized.TestCase):
     # pylint: disable=unbalanced-tuple-unpacking
     def assertArrayEqual(self, actual, expected, **kwargs):
         actual, expected = self._check_and_remove_alignment_and_grid(actual, expected)
-        atol = torch.finfo(expected.data.dtype).eps
-        rtol = expected.abs().max() * atol
+        rtol = torch.finfo(expected.data.dtype).eps
+        atol = expected.abs().max() * rtol
         torch.testing.assert_close(actual, expected, atol=atol, rtol=rtol, **kwargs)
 
     def assertAllClose(self, actual, expected, **kwargs):
         actual, expected = self._check_and_remove_alignment_and_grid(actual, expected)
         torch.testing.assert_close(actual, expected, **kwargs)
 
-    # pylint: enable=unbalanced-tuple-unpacking
+    def assertNestedTuplesEqual(self, tuple1, tuple2, atol=1e-6, rtol=1e-6):
+        """Assert that two nested tuples containing tensors are equal."""
+        def _compare_recursive(t1, t2):
+            if type(t1) != type(t2):
+                return False
+            
+            if isinstance(t1, tuple):
+                if len(t1) != len(t2):
+                    return False
+                return all(_compare_recursive(x, y) for x, y in zip(t1, t2))
+            
+            elif isinstance(t1, torch.Tensor) and isinstance(t2, torch.Tensor):
+                try:
+                    self.assertAllClose(t1, t2, atol=atol, rtol=rtol)
+                    return True
+                except AssertionError:
+                    return False
+            
+            elif t1 is None and t2 is None:
+                return True
+            
+            else:
+                return t1 == t2
+        
+        self.assertTrue(_compare_recursive(tuple1, tuple2), 
+                    f"Nested tuples are not equal:\n{tuple1}\nvs\n{tuple2}")
+

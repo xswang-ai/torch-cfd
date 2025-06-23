@@ -400,11 +400,38 @@ class GridVariableBoundaryTest(test_utils.TestCase):
         dict(
             shape=(5,),
             data=tensor([1, 2, 3, 4, 5]),
+            offset=(0.5,),
+            shift_offset=-1,
+            bc_values=((0.0, 0.0),),
+            expected_data=tensor([-1, 1, 2, 3, 4]),
+            expected_offset=(-0.5,),
+        ),
+        dict(
+            shape=(5,),
+            data=tensor([1, 2, 3, 4, 5]),
             offset=(0.0,),
             shift_offset=-1,
             bc_values=((0.0, 0.0),),
-            expected_data=tensor([0, 0, 2, 3, 4]),
+            expected_data=tensor([-2, 0, 2, 3, 4]),
             expected_offset=(-1.0,),
+        ),
+        dict(
+            shape=(5,),
+            data=tensor([1, 2, 3, 4, 5]),
+            offset=(0.0,),
+            shift_offset=1,
+            bc_values=((0.0, 0.0),),
+            expected_data=tensor([2, 3, 4, 5, 0]),
+            expected_offset=(1.0,),
+        ),
+        dict(
+            shape=(5,),
+            data=tensor([1, 2, 3, 4, 5]),
+            offset=(0.0,),
+            shift_offset=1,
+            bc_values=((0.0, 20.0),),
+            expected_data=tensor([2, 3, 4, 5, 20]),
+            expected_offset=(1.0,),
         ),
         dict(
             shape=(5,),
@@ -426,12 +453,10 @@ class GridVariableBoundaryTest(test_utils.TestCase):
         expected_data,
         expected_offset,
     ):
-        """Test grids.shift with 1D arrays
-        """
+        """Test grids.shift with 1D arrays"""
         grid = grids.Grid(shape)
 
-        bc = boundaries.dirichlet_boundary_conditions(
-            ndim=1, bc_values=bc_values)
+        bc = boundaries.dirichlet_boundary_conditions(ndim=1, bc_values=bc_values)
         u = grids.GridVariable(data, offset, grid, bc)
         u = u.impose_bc()
 
@@ -475,8 +500,7 @@ class GridVariableBoundaryTest(test_utils.TestCase):
         """Test grids.shift with 1D arrays and various boundary conditions."""
         grid = grids.Grid(shape)
 
-        bc = boundaries.periodic_boundary_conditions(
-            ndim=1)
+        bc = boundaries.periodic_boundary_conditions(ndim=1)
         u = grids.GridVariable(data, offset, grid, bc)
         u_shifted = u.shift(offset=shift_offset, dim=0)
 
@@ -484,7 +508,6 @@ class GridVariableBoundaryTest(test_utils.TestCase):
         self.assertEqual(u_shifted.offset, expected_offset)
         self.assertEqual(u_shifted.grid, grid)
         self.assertIsNone(u_shifted.bc)
-
 
     @parameterized.parameters(
         dict(
@@ -1370,6 +1393,177 @@ class GridTest(test_utils.TestCase):
                 tensor([[1, 1, 0], [1, 1, 0], [1, 1, 0]]),
             )
             self.assertAllClose(expected, grids.domain_interior_masks(grid))
+
+    @parameterized.named_parameters(
+        # Test dim=0 (x boundaries) with different offsets
+        dict(
+            testcase_name="_dim_0_lower_left_corner",
+            shape=(4, 6),
+            domain=((0.0, 2.0), (0.0, 3.0)),
+            dim=0,
+            offset=(0.0, 0.0),
+            expected_lower_x=0.0,
+            expected_upper_x=2.0,
+            expected_y=tensor([0.0, 0.5, 1.0, 1.5, 2.0, 2.5]),
+        ),
+        dict(
+            testcase_name="_dim_0_edge_center",
+            shape=(4, 6),
+            domain=((0.0, 2.0), (0.0, 3.0)),
+            dim=0,
+            offset=(0.0, 0.5),
+            expected_lower_x=0.0,
+            expected_upper_x=2.0,
+            expected_y=tensor([0.25, 0.75, 1.25, 1.75, 2.25, 2.75]),
+        ),
+        dict(
+            testcase_name="_dim_0_cell_center",
+            # for cell center, the boundary mesh is not technically at the edge center
+            # but if a function-valued bc is given, the value at these edge center will be used to impose the boundary condition
+            shape=(4, 6),
+            domain=((0.0, 2.0), (0.0, 3.0)),
+            dim=0,
+            offset=(0.5, 0.5),
+            expected_lower_x=0.0,
+            expected_upper_x=2.0,
+            expected_y=tensor([0.25, 0.75, 1.25, 1.75, 2.25, 2.75]),
+        ),
+        dict(
+            testcase_name="_dim_0_upper_right_corner",
+            shape=(4, 6),
+            domain=((0.0, 2.0), (0.0, 3.0)),
+            dim=0,
+            offset=(1.0, 1.0),
+            expected_lower_x=0.0,
+            expected_upper_x=2.0,
+            expected_y=tensor([0.5, 1.0, 1.5, 2.0, 2.5, 3.0]),
+        ),
+        # Test dim=1 (y boundaries) with different offsets
+        dict(
+            testcase_name="_dim_1_offset_lower_left_corner",
+            shape=(4, 6),
+            domain=((0.0, 2.0), (0.0, 3.0)),
+            dim=1,
+            offset=(0.0, 0.0),
+            expected_lower_y=0.0,
+            expected_upper_y=3.0,
+            expected_x=tensor([0.0, 0.5, 1.0, 1.5]),
+        ),
+        dict(
+            testcase_name="_dim_1_offset_edge_center",
+            shape=(4, 6),
+            domain=((0.0, 2.0), (0.0, 3.0)),
+            dim=1,
+            offset=(0.5, 0.0),
+            expected_lower_y=0.0,
+            expected_upper_y=3.0,
+            expected_x=tensor([0.25, 0.75, 1.25, 1.75]),
+        ),
+        dict(
+            testcase_name="_dim_1_offset_upper_right_corner",
+            shape=(4, 6),
+            domain=((0.0, 2.0), (0.0, 3.0)),
+            dim=1,
+            offset=(1.0, 1.0),
+            expected_lower_y=0.0,
+            expected_upper_y=3.0,
+            expected_x=tensor([0.5, 1.0, 1.5, 2.0]),
+        ),
+        # Test with different domains
+        dict(
+            testcase_name="_dim_0_custom_domain",
+            shape=(3, 4),
+            domain=((-1.0, 1.0), (-2.0, 2.0)),
+            dim=0,
+            offset=(0.5, 0.5),
+            expected_lower_x=-1.0,
+            expected_upper_x=1.0,
+            expected_y=tensor([-1.5, -0.5, 0.5, 1.5]),
+        ),
+        dict(
+            testcase_name="_dim_1_custom_domain",
+            shape=(3, 4),
+            domain=((-1.0, 1.0), (-2.0, 2.0)),
+            dim=1,
+            offset=(0.5, 0.5),
+            expected_lower_y=-2.0,
+            expected_upper_y=2.0,
+            expected_x=tensor([-2/3, 0.0, 2/3]),
+        ),
+    )
+    def test_boundary_mesh_2d(
+        self,
+        shape,
+        domain,
+        dim,
+        offset,
+        expected_lower_x=None,
+        expected_upper_x=None,
+        expected_lower_y=None,
+        expected_upper_y=None,
+        expected_x=None,
+        expected_y=None,
+    ):
+        """Test Grid.boundary_mesh for 2D grids with different offsets and dimensions."""
+        grid = grids.Grid(shape, domain=domain)
+
+        lower_coords, upper_coords = grid.boundary_mesh(dim, offset)
+
+        if dim == 0:  # x boundaries
+            # Check structure: ((x_left, y_coords), (x_right, y_coords))
+            self.assertEqual(len(lower_coords), 2)
+            self.assertEqual(len(upper_coords), 2)
+
+            x_left, y_coords_left = lower_coords
+            x_right, y_coords_right = upper_coords
+
+            # Check y coordinates (should be the same for both boundaries)
+            self.assertAllClose(y_coords_left, expected_y, atol=1e-6, rtol=1e-10)
+            self.assertAllClose(y_coords_right, expected_y, atol=1e-6, rtol=1e-10)
+
+            # Check x coordinates (should be constant arrays with boundary values)
+            self.assertTrue(
+                torch.allclose(x_left, torch.full_like(y_coords_left, expected_lower_x))
+            )
+            self.assertTrue(
+                torch.allclose(
+                    x_right, torch.full_like(y_coords_right, expected_upper_x)
+                )
+            )
+
+            # Check shapes
+            self.assertEqual(x_left.shape, (shape[1],))
+            self.assertEqual(x_right.shape, (shape[1],))
+            self.assertEqual(y_coords_left.shape, (shape[1],))
+            self.assertEqual(y_coords_right.shape, (shape[1],))
+
+        elif dim == 1:  # y boundaries
+            # Check structure: ((x_coords, y_bottom), (x_coords, y_top))
+            self.assertEqual(len(lower_coords), 2)
+            self.assertEqual(len(upper_coords), 2)
+
+            x_coords_bottom, y_bottom = lower_coords
+            x_coords_top, y_top = upper_coords
+
+            # Check x coordinates (should be the same for both boundaries)
+            self.assertAllClose(x_coords_bottom, expected_x, atol=1e-6, rtol=1e-10)
+            self.assertAllClose(x_coords_top, expected_x, atol=1e-6, rtol=1e-10)
+
+            # Check y coordinates (should be constant arrays with boundary values)
+            self.assertTrue(
+                torch.allclose(
+                    y_bottom, torch.full_like(x_coords_bottom, expected_lower_y)
+                )
+            )
+            self.assertTrue(
+                torch.allclose(y_top, torch.full_like(x_coords_top, expected_upper_y))
+            )
+
+            # Check shapes
+            self.assertEqual(x_coords_bottom.shape, (shape[0],))
+            self.assertEqual(x_coords_top.shape, (shape[0],))
+            self.assertEqual(y_bottom.shape, (shape[0],))
+            self.assertEqual(y_top.shape, (shape[0],))
 
 
 if __name__ == "__main__":

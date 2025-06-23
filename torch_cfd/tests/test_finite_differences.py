@@ -25,19 +25,8 @@ from einops import repeat
 from torch_cfd import boundaries, finite_differences as fdm, grids, test_utils
 
 BCType = grids.BCType
-
-
-def _trim_boundary(array):
-    # fixed jax-cfd bug that trims all dimension for a batched GridVariable
-    if isinstance(array, grids.GridVariable):
-        # Convert tuple of slices to individual slice objects
-        trimmed_slices = (slice(1, -1),) * array.grid.ndim
-        data = array.data[(..., *trimmed_slices)]
-        return grids.GridVariable(data, array.offset, array.grid)
-    else:
-        tensor = torch.as_tensor(array)
-        trimmed_slices = (slice(1, -1),) * tensor.ndim
-        return tensor[(..., *trimmed_slices)]
+Padding = grids.Padding
+trim_boundary = fdm.trim_boundary
 
 
 def grid_variable_periodic(data, offset, grid):
@@ -46,10 +35,56 @@ def grid_variable_periodic(data, offset, grid):
     )
 
 
-def grid_variable_dirichlet(data, offset, grid):
+def grid_variable_dirichlet_constant(data, offset, grid, bc_values=None):
     return grids.GridVariable(
-        data, offset, grid, bc=boundaries.dirichlet_boundary_conditions(grid.ndim)
+        data,
+        offset,
+        grid,
+        bc=boundaries.dirichlet_boundary_conditions(grid.ndim, bc_values),
     )
+
+
+def grid_variable_dirichlet_nonhomogeneous(data, offset, grid, bc_values):
+    bc = boundaries.DiscreteBoundaryConditions(
+        ((BCType.DIRICHLET, BCType.DIRICHLET),) * grid.ndim, bc_values
+    )
+    return grids.GridVariable(data, offset, grid, bc)
+
+
+def grid_variable_dirichlet_function_nonhomogeneous(data, offset, grid, bc_funcs):
+    bc_types = ((BCType.DIRICHLET, BCType.DIRICHLET),) * grid.ndim
+    bc = boundaries.FunctionBoundaryConditions(bc_types, bc_funcs, grid, offset)
+    return grids.GridVariable(data, offset, grid, bc)
+
+
+def grid_variable_dirichlet_nonhomogeneous_and_periodic(
+    data, offset, grid, bc_values, periodic_dim=0
+):
+    bc_dirichlet = (BCType.DIRICHLET, BCType.DIRICHLET)
+    bc_periodic = (BCType.PERIODIC, BCType.PERIODIC)
+    bc_types = tuple(
+        bc_periodic if i == periodic_dim else bc_dirichlet for i in range(grid.ndim)
+    )
+    bc = boundaries.DiscreteBoundaryConditions(bc_types, bc_values)
+    return grids.GridVariable(data, offset, grid, bc)
+
+
+def grid_variable_vector_batch_from_functions(
+    grid, offsets, vfuncs, bc_u, bc_v, batch_size=1
+):
+    v = []
+    for dim, (offset, bc) in enumerate(zip(offsets, (bc_u, bc_v))):
+        x, y = grid.mesh(offset)
+        data = vfuncs(x, y)
+        data = repeat(data[dim], "h w -> b h w", b=batch_size)
+        v.append(
+            grid_variable_dirichlet_nonhomogeneous_and_periodic(
+                data, offset, grid, bc, periodic_dim=dim
+            )
+        )
+
+    v = grids.GridVariableVector(tuple(v))
+    return v
 
 
 def stack_tensor_matrix(matrix):
@@ -193,11 +228,14 @@ class FiniteDifferenceTest(test_utils.TestCase):
         dict(
             testcase_name="_2D_sine",
             shape=(32, 32),
-            f=lambda x, y: torch.sin(math.pi*x) * torch.sin(math.pi*y),
-            g=lambda x, y: -2 *math.pi**2 * torch.sin(math.pi*x) * torch.sin(math.pi*y),
-            atol=1/32,
+            f=lambda x, y: torch.sin(math.pi * x) * torch.sin(math.pi * y),
+            g=lambda x, y: -2
+            * math.pi**2
+            * torch.sin(math.pi * x)
+            * torch.sin(math.pi * y),
+            atol=1 / 32,
             rtol=1e-3,
-        )
+        ),
     )
     def test_laplacian_periodic(self, shape, f, g, atol, rtol):
         step = tuple([1.0 / s for s in shape])
@@ -205,45 +243,39 @@ class FiniteDifferenceTest(test_utils.TestCase):
         offset = (0,) * len(shape)
         mesh = grid.mesh(offset)
         u = grid_variable_periodic(f(*mesh), offset, grid)
-        expected_laplacian = _trim_boundary(grids.GridVariable(g(*mesh), offset, grid))
-        actual_laplacian = _trim_boundary(fdm.laplacian(u))
+        expected_laplacian = trim_boundary(grids.GridVariable(g(*mesh), offset, grid))
+        actual_laplacian = trim_boundary(fdm.laplacian(u))
         self.assertAllClose(expected_laplacian, actual_laplacian, atol=atol, rtol=rtol)
-
 
     @parameterized.named_parameters(
         dict(
-            testcase_name="_2D_constant",
-            shape=(20, 20),
-            f=lambda x, y: torch.ones_like(x),
-            g=lambda x, y: torch.zeros_like(x),
-            atol=1e-3,
-            rtol=1e-8,
-        ),
-        dict(
-            testcase_name="_2D_quadratic",
+            testcase_name="_2D_quartic",
             shape=(21, 21),
-            f=lambda x, y: x * (x - 1.0) + y * (y - 1.0),
-            g=lambda x, y: 4 * torch.ones_like(x),
-            atol=1e-3,
-            rtol=1e-8,
+            f=lambda x, y: x * (x - 1.0) * y * (y - 1.0),
+            g=lambda x, y: 2 * y * (y - 1.0) + 2 * x * (x - 1.0),
+            atol=1e-2,
+            rtol=1e-5,
         ),
         dict(
             testcase_name="_2D_sine",
-            shape=(32, 32), 
-            f=lambda x, y: torch.sin(math.pi*x) * torch.sin(math.pi*y),
-            g=lambda x, y: -2 *math.pi**2 * torch.sin(math.pi*x) * torch.sin(math.pi*y),
-            atol=1/32,
+            shape=(32, 32),
+            f=lambda x, y: torch.sin(math.pi * x) * torch.sin(math.pi * y),
+            g=lambda x, y: -2
+            * math.pi**2
+            * torch.sin(math.pi * x)
+            * torch.sin(math.pi * y),
+            atol=1 / 32,
             rtol=1e-3,
-        )
+        ),
     )
-    def test_laplacian_dirichlet(self, shape, f, g, atol, rtol):
+    def test_laplacian_dirichlet_homogeneous(self, shape, f, g, atol, rtol):
         step = tuple([1.0 / s for s in shape])
         grid = grids.Grid(shape, step)
         offset = (0,) * len(shape)
         mesh = grid.mesh(offset)
-        u = grid_variable_dirichlet(f(*mesh), offset, grid)
-        expected_laplacian = _trim_boundary(grids.GridVariable(g(*mesh), offset, grid))
-        actual_laplacian = _trim_boundary(fdm.laplacian(u))
+        u = grid_variable_dirichlet_constant(f(*mesh), offset, grid)
+        expected_laplacian = trim_boundary(grids.GridVariable(g(*mesh), offset, grid))
+        actual_laplacian = trim_boundary(fdm.laplacian(u))
         self.assertAllClose(expected_laplacian, actual_laplacian, atol=atol, rtol=rtol)
 
     @parameterized.named_parameters(
@@ -267,54 +299,66 @@ class FiniteDifferenceTest(test_utils.TestCase):
         ),
     )
     def test_divergence(self, shape, offsets, f, g, atol, rtol):
+        # note: somehow the bcs are incorrectly set but the divergence is still correct
         step = tuple([1.0 / s for s in shape])
         grid = grids.Grid(shape, step)
         v = [
-            grid_variable_periodic(f(*grid.mesh(offset))[axis], offset, grid)
-            for axis, offset in enumerate(offsets)
+            grid_variable_periodic(f(*grid.mesh(offset))[dim], offset, grid)
+            for dim, offset in enumerate(offsets)
         ]
-        expected_divergence = _trim_boundary(
+        expected_divergence = trim_boundary(
             grids.GridVariable(g(*grid.mesh()), (0,) * grid.ndim, grid)
         )
-        actual_divergence = _trim_boundary(fdm.divergence(v))
+        actual_divergence = trim_boundary(fdm.divergence(v))
         self.assertAllClose(
             expected_divergence, actual_divergence, atol=atol, rtol=rtol
         )
 
     @parameterized.named_parameters(
-        # https://en.wikipedia.org/wiki/Curl_(mathematics)#Examples
         dict(
-            testcase_name="_solenoidal",
-            shape=(20, 20),
+            testcase_name="_solenoidal_8x8",
+            shape=(8, 8),
             offsets=((0.5, 0), (0, 0.5)),
             f=lambda x, y: (y, -x),
             g=lambda x, y: -2 * torch.ones_like(x),
-            atol=1e-3,
-            rtol=1e-10,
+            bc_u=((None, None), (torch.zeros(8), torch.ones(8))),
+            bc_v=((torch.zeros(8), -torch.ones(8)), (None, None)),
         ),
         dict(
-            testcase_name="_wikipedia_example_2",
+            testcase_name="_solenoidal_32x32",
+            shape=(32, 32),
+            offsets=((0.5, 0), (0, 0.5)),
+            f=lambda x, y: (y, -x),
+            g=lambda x, y: -2 * torch.ones_like(x),
+            bc_u=((None, None), (torch.zeros(32), torch.ones(32))),
+            bc_v=((torch.zeros(32), -torch.ones(32)), (None, None)),
+        ),
+        dict(
+            testcase_name="_wikipedia_example_2d_21x21",
             shape=(21, 21),
             offsets=((0.5, 0), (0, 0.5)),
             f=lambda x, y: (torch.ones_like(x), -(x**2)),
             g=lambda x, y: -2 * x,
-            atol=1e-3,
-            rtol=1e-10,
+            bc_u=((None, None), (torch.ones(21), torch.ones(21))),
+            bc_v=((torch.zeros(21), -torch.ones(21)), (None, None)),
         ),
     )
-    def test_curl_2d(self, shape, offsets, f, g, atol, rtol):
+    def test_curl_2d(self, shape, offsets, f, g, bc_u, bc_v):
         step = tuple([1.0 / s for s in shape])
         grid = grids.Grid(shape, step)
+        bcvals = [bc_u, bc_v]
         v = [
-            grid_variable_periodic(f(*grid.mesh(offset))[axis], offset, grid)
-            for axis, offset in enumerate(offsets)
+            grid_variable_dirichlet_nonhomogeneous_and_periodic(
+                f(*grid.mesh(offset))[dim], offset, grid, bcval, dim
+            )
+            for dim, (offset, bcval) in enumerate(zip(offsets, bcvals))
         ]
         result_offset = (0.5, 0.5)
-        expected_curl = _trim_boundary(
+        expected_curl = trim_boundary(
             grids.GridVariable(g(*grid.mesh(result_offset)), result_offset, grid)
         )
-        actual_curl = _trim_boundary(fdm.curl_2d(v))
-        self.assertAllClose(expected_curl, actual_curl, atol=atol, rtol=rtol)
+        actual_curl = trim_boundary(fdm.curl_2d(v))
+        self.assertAllClose(actual_curl, expected_curl, atol=1e-5, rtol=1e-10)
 
     @parameterized.parameters(
         # Periodic BC
@@ -369,6 +413,498 @@ class FiniteDifferenceTest(test_utils.TestCase):
         actual = torch.cat([a for a in actual], dim=0)
         expected = 4.0 * torch.tensor(expected)
         self.assertAllClose(actual, expected)
+
+
+class FiniteDifferenceNonHomogeneousTest(test_utils.TestCase):
+    """Test finite difference operations with non-homogeneous boundary conditions."""
+
+    @parameterized.parameters(
+        dict(
+            shape=(8,),
+            offset=(0,),
+        ),
+        dict(
+            shape=(8,),
+            offset=(1,),
+        ),
+        dict(
+            shape=(16,),
+            offset=(0,),
+        ),
+        dict(shape=(16,), offset=(1,)),
+        dict(shape=(16,), offset=(0.5,)),
+    )
+    def test_forward_difference_nonhomogeneous_bc_1d(self, shape, offset):
+        """Test forward difference operator with non-homogeneous boundary conditions."""
+        grid = grids.Grid(shape, domain=((0.0, 1.0),))
+        mesh = grid.mesh(offset)
+
+        # Linear function: u = 2x + 1
+        # Forward difference should give 2
+        # checking the boundary behavior of padding
+        u_data = 2 * mesh[0] + 1
+
+        # Non-homogeneous boundary conditions
+        bc_values = ((1.0, 3.0),)  # u(0) = 1, u(1) = 3
+
+        u = grids.GridVariable(
+            u_data,
+            offset,
+            grid,
+            bc=boundaries.dirichlet_boundary_conditions(grid.ndim, bc_values),
+        )
+        u = u.impose_bc()
+
+        # the forward diff needs another padding beyond the boundary
+        # by default the padding mode is 'extend' or replicate?
+        # for the MAC
+        # u.shift(+1, 0) gets the replicate padding at the end
+        # check the behavior of pad in this case
+        forward_diff = trim_boundary(fdm.forward_difference(u, dim=0))
+
+        expected = 2.0 * torch.ones_like(forward_diff.data)
+
+        self.assertAllClose(forward_diff.data, expected, atol=1e-4, rtol=1e-7)
+
+    @parameterized.parameters(
+        dict(
+            shape=(8,),
+            offset=(0,),
+        ),
+        dict(
+            shape=(8,),
+            offset=(1,),
+        ),
+        dict(
+            shape=(16,),
+            offset=(0,),
+        ),
+        dict(shape=(16,), offset=(1,)),
+        dict(shape=(16,), offset=(0.5,)),
+    )
+    def test_backward_difference_nonhomogeneous_bc_1d(self, shape, offset):
+        """Test backward difference operator with non-homogeneous boundary conditions."""
+        grid = grids.Grid(shape, domain=((0.0, 1.0),))
+        mesh = grid.mesh(offset)
+
+        u_data = 3 * mesh[0] + 0.5
+        bc_values = ((0.5, 3.5),)  # u(0) = 0.5, u(1) = 3.5
+
+        u = grids.GridVariable(
+            u_data,
+            offset,
+            grid,
+            bc=boundaries.dirichlet_boundary_conditions(grid.ndim, bc_values),
+        )
+        u = u.impose_bc()
+        backward_diff = trim_boundary(fdm.backward_difference(u, dim=0))
+
+        expected = 3.0 * torch.ones_like(backward_diff.data)
+
+        self.assertAllClose(backward_diff.data, expected, atol=1e-4, rtol=1e-7)
+
+    @parameterized.parameters(
+        dict(
+            shape=(8,),
+            offset=(0,),
+        ),
+        dict(
+            shape=(8,),
+            offset=(1,),
+        ),
+        dict(
+            shape=(16,),
+            offset=(0,),
+        ),
+        dict(shape=(16,), offset=(1,)),
+        dict(shape=(16,), offset=(0.5,)),
+    )
+    def test_central_difference_nonhomogeneous_bc_1d(self, shape, offset):
+        """Test central difference operator with non-homogeneous boundary conditions."""
+        grid = grids.Grid(shape, domain=((0.0, 1.0),))
+        mesh = grid.mesh(offset)
+
+        u_data = 4 * mesh[0] + 2
+
+        bc_values = ((2.0, 6.0),)  # u(0) = 2, u(1) = 6
+
+        u = grids.GridVariable(
+            u_data,
+            offset,
+            grid,
+            bc=boundaries.dirichlet_boundary_conditions(grid.ndim, bc_values),
+        )
+        u = u.impose_bc()
+
+        central_diff = trim_boundary(fdm.central_difference(u, dim=0))
+
+        expected = 4.0 * torch.ones_like(central_diff.data)
+
+        self.assertAllClose(central_diff.data, expected, atol=1e-4, rtol=1e-7)
+
+    @parameterized.parameters(
+        dict(
+            shape=(16, 16),
+            offset=(0, 0),
+        ),
+        dict(
+            shape=(16, 16),
+            offset=(0, 1),
+        ),
+        dict(
+            shape=(16, 16),
+            offset=(1, 0),
+        ),
+        dict(shape=(16, 16), offset=(1, 1)),
+        dict(shape=(32, 32), offset=(0.5, 1)),
+        dict(shape=(32, 32), offset=(1, 0.5)),
+    )
+    def test_central_difference_nonhomogeneous_bc_2d(self, shape, offset):
+        """Test central difference operator with non-homogeneous boundary conditions in 2D."""
+        grid = grids.Grid(shape, domain=((0.0, 1.0), (0.0, 1.0)))
+        x, y = grid.mesh(offset)
+        h = max(grid.step)
+
+        f = lambda x, y: x**2 + 2 * y**2
+        fx = lambda x, y: 2 * x
+        fy = lambda x, y: 4 * y
+        u_data = f(x, y)
+        fx_data = fx(x, y)
+        fy_data = fy(x, y)
+
+        u = grid_variable_dirichlet_function_nonhomogeneous(u_data, offset, grid, f)
+        u = u.impose_bc()
+
+        grad_x = grids.GridVariable(fx_data, offset, grid)
+        grad_y = grids.GridVariable(fy_data, offset, grid)
+
+        # Check that gradients are reasonable in interior
+        interior_grad_x = trim_boundary(fdm.central_difference(u, dim=0))
+        interior_grad_y = trim_boundary(fdm.central_difference(u, dim=1))
+
+        # Get expected gradients at interior points
+        expected_grad_x = trim_boundary(grad_x)
+        expected_grad_y = trim_boundary(grad_y)
+
+        # Use relaxed tolerance for finite difference approximation
+        self.assertAllClose(interior_grad_x, expected_grad_x, atol=6 * h, rtol=h)
+        self.assertAllClose(interior_grad_y, expected_grad_y, atol=6 * h, rtol=h)
+
+    @parameterized.named_parameters(
+        dict(
+            testcase_name="_x_direction_offset_0",
+            shape=(8, 4),
+            offset=(0, 0),
+            f=lambda x, y: x**2,
+            g=lambda x, y: 2 * torch.ones_like(x),
+            bc_values=((torch.zeros(4), torch.ones(4)), (None, None)),
+            periodic_dim=1,
+        ),
+        dict(
+            testcase_name="_x_direction_offset_1",
+            shape=(8, 8),
+            offset=(1, 0),
+            f=lambda x, y: x**2,
+            g=lambda x, y: 2 * torch.ones_like(x),
+            bc_values=((torch.zeros(8), torch.ones(8)), (None, None)),
+            periodic_dim=1,
+        ),
+        dict(
+            testcase_name="_y_direction_offset_0",
+            shape=(8, 4),
+            offset=(0, 0),
+            f=lambda x, y: y**2,
+            g=lambda x, y: 2 * torch.ones_like(y),
+            bc_values=((None, None), (torch.zeros(8), torch.ones(8))),
+            periodic_dim=0,
+        ),
+        dict(
+            testcase_name="_y_direction_offset_1",
+            shape=(4, 4),
+            offset=(0, 1),
+            f=lambda x, y: y**2,
+            g=lambda x, y: 2 * torch.ones_like(y),
+            bc_values=((None, None), (torch.zeros(4), torch.ones(4))),
+            periodic_dim=0,
+        ),
+    )
+    def test_laplacian_dirichlet_nonhomogeneous(
+        self, shape, offset, f, g, bc_values, periodic_dim
+    ):
+        grid = grids.Grid(shape, domain=((0.0, 1.0), (0.0, 1.0)))
+        mesh = grid.mesh(offset)
+
+        # u = x^2, Laplacian of u is 2
+        u_data = f(*mesh)
+        expected_laplacian = trim_boundary(grids.GridVariable(g(*mesh), offset, grid))
+
+        # Create GridVariable with non-homogeneous Dirichlet BCs
+        u = grid_variable_dirichlet_nonhomogeneous_and_periodic(
+            u_data, offset, grid, bc_values, periodic_dim=periodic_dim
+        )
+        # u = u.bc.impose_bc(u, mode=Padding.EXTEND)
+        u = u.impose_bc()
+
+        # Compute Laplacian using finite differences
+        actual_laplacian = trim_boundary(fdm.laplacian(u))
+
+        # Use relaxed tolerance due to boundary effects
+        self.assertAllClose(actual_laplacian, expected_laplacian, atol=1e-2, rtol=1e-2)
+
+    @parameterized.named_parameters(
+        dict(
+            testcase_name="_constant_offset_0_0",
+            shape=(4, 4),
+            offset=(0, 0),
+            f=lambda x, y: torch.ones_like(x),
+            g=lambda x, y: torch.zeros_like(x),
+            bc_values=((torch.ones(4), torch.ones(4)), (torch.ones(4), torch.ones(4))),
+            atol=1e-3,
+            rtol=1e-10,
+        ),
+        dict(
+            testcase_name="_constant_offset_0_1",
+            shape=(4, 4),
+            offset=(0, 1),
+            f=lambda x, y: torch.ones_like(x),
+            g=lambda x, y: torch.zeros_like(x),
+            bc_values=((torch.ones(4), torch.ones(4)), (torch.ones(4), torch.ones(4))),
+            atol=1e-3,
+            rtol=1e-10,
+        ),
+        dict(
+            testcase_name="_constant_offset_1_0",
+            shape=(4, 4),
+            offset=(1, 0),
+            f=lambda x, y: torch.ones_like(x),
+            g=lambda x, y: torch.zeros_like(x),
+            bc_values=((torch.ones(4), torch.ones(4)), (torch.ones(4), torch.ones(4))),
+            atol=1e-3,
+            rtol=1e-10,
+        ),
+        dict(
+            testcase_name="_constant_offset_1_1",
+            shape=(4, 4),
+            offset=(1, 1),
+            f=lambda x, y: torch.ones_like(x),
+            g=lambda x, y: torch.zeros_like(x),
+            bc_values=((torch.ones(4), torch.ones(4)), (torch.ones(4), torch.ones(4))),
+            atol=1e-3,
+            rtol=1e-10,
+        ),
+        dict(
+            testcase_name="_linear_offset_0_0",
+            shape=(8, 8),
+            offset=(0, 0),
+            f=lambda x, y: x + 2 * y,
+            g=lambda x, y: torch.zeros_like(x),
+            bc_values=(
+                (torch.linspace(0, 2, 9)[:-1], torch.linspace(1, 3, 9)[:-1]),
+                (torch.linspace(0, 1, 9)[:-1], torch.linspace(2, 3, 9)[:-1]),
+            ),  # ((2y, 1+2y), (x, 2+x))
+            atol=1e-3,
+            rtol=1e-10,
+        ),
+        dict(
+            testcase_name="_linear_offset_0_1",
+            shape=(8, 8),
+            offset=(0, 1),
+            f=lambda x, y: x + 2 * y,
+            g=lambda x, y: torch.zeros_like(x),
+            bc_values=(
+                (torch.linspace(0, 2, 9)[1:], torch.linspace(1, 3, 9)[1:]),
+                (torch.linspace(0, 1, 9)[:-1], torch.linspace(2, 3, 9)[:-1]),
+            ),  # ((2y, 1+2y), (x, 2+x))
+            atol=1e-3,
+            rtol=1e-10,
+        ),
+        dict(
+            testcase_name="_linear_offset_1_0",
+            shape=(8, 8),
+            offset=(1, 0),
+            f=lambda x, y: x + 2 * y,
+            g=lambda x, y: torch.zeros_like(x),
+            bc_values=(
+                (torch.linspace(0, 2, 9)[:-1], torch.linspace(1, 3, 9)[:-1]),
+                (torch.linspace(0, 1, 9)[1:], torch.linspace(2, 3, 9)[1:]),
+            ),  # ((2y, 1+2y), (x, 2+x))
+            atol=1e-3,
+            rtol=1e-10,
+        ),
+        dict(
+            testcase_name="_linear_offset_1_1",
+            shape=(8, 8),
+            offset=(1, 1),
+            f=lambda x, y: x + 2 * y,
+            g=lambda x, y: torch.zeros_like(x),
+            bc_values=(
+                (torch.linspace(0, 2, 9)[1:], torch.linspace(1, 3, 9)[1:]),
+                (torch.linspace(0, 1, 9)[1:], torch.linspace(2, 3, 9)[1:]),
+            ),  # ((2y, 1+2y), (x, 2+x))
+            atol=1e-3,
+            rtol=1e-10,
+        ),
+    )
+    def test_laplacian_dirichlet_nonhomogeneous_2d(
+        self, shape, offset, f, g, bc_values, atol, rtol
+    ):
+        grid = grids.Grid(shape, domain=((0.0, 1.0), (0.0, 1.0)))
+        mesh = grid.mesh(offset)
+
+        # Create GridVariable with non-homogeneous Dirichlet BCs
+        u_data = f(*mesh)
+        expected_laplacian = trim_boundary(grids.GridVariable(g(*mesh), offset, grid))
+
+        u = grid_variable_dirichlet_nonhomogeneous(u_data, offset, grid, bc_values)
+        u = u.impose_bc()
+
+        # Compute Laplacian using finite differences
+        actual_laplacian = trim_boundary(fdm.laplacian(u))
+
+        # Use relaxed tolerance due to boundary effects
+        self.assertAllClose(actual_laplacian, expected_laplacian, atol=atol, rtol=rtol)
+
+    @parameterized.named_parameters(
+        dict(
+            testcase_name="_linear_cell_center",
+            shape=(16, 16),
+            offset=(0.5, 0.5),
+            f=lambda x, y: x + 2 * y,
+            g=lambda x, y: torch.zeros_like(x),
+            atol=1e-6,
+            rtol=1e-10,
+        ),
+        dict(
+            testcase_name="_linear_vertical_edge_center",
+            shape=(16, 16),
+            offset=(1.0, 0.5),
+            f=lambda x, y: 2 * x + y,
+            g=lambda x, y: torch.zeros_like(x),
+            atol=1e-6,
+            rtol=1e-10,
+        ),
+        dict(
+            testcase_name="_linear_horizontal_edge_center",
+            shape=(16, 16),
+            offset=(0.5, 1.0),
+            f=lambda x, y: x + 2 * y,
+            g=lambda x, y: torch.zeros_like(x),
+            atol=1e-6,
+            rtol=1e-10,
+        ),
+        dict(
+            testcase_name="_quadratic_lower_left_corner",
+            shape=(32, 32),
+            offset=(0, 0),
+            f=lambda x, y: x**2 + 2 * y**2 + x * y,
+            g=lambda x, y: (2 + 4) * torch.ones_like(x),
+            atol=1 / 32,
+            rtol=1e-2,
+        ),
+        dict(
+            testcase_name="_quadratic_vertical_edge_center",
+            shape=(32, 32),
+            offset=(1, 0.5),
+            f=lambda x, y: 3 * x**2 + y**2 - x * y,
+            g=lambda x, y: (6 + 2) * torch.ones_like(x),
+            atol=1 / 32,
+            rtol=1e-2,
+        ),
+        dict(
+            testcase_name="_quadratic_lower_right_corner",
+            shape=(32, 32),
+            offset=(1.0, 0),
+            f=lambda x, y: 0.5 * x**2 + 1.5 * y**2 + 2 * x * y,
+            g=lambda x, y: (1 + 3) * torch.ones_like(x),
+            atol=1 / 32,
+            rtol=1e-2,
+        ),
+        dict(
+            testcase_name="_quadratic_upper_right_corner",
+            shape=(32, 32),
+            offset=(1, 1),
+            f=lambda x, y: 2 * x**2 + 0.5 * y**2 - 0.5 * x * y + x + y,
+            g=lambda x, y: (4 + 1) * torch.ones_like(x),
+            atol=1 / 32,
+            rtol=1e-2,
+        ),
+        dict(
+            testcase_name="_quadratic_horizontal_edge_center",
+            shape=(32, 32),
+            offset=(0.5, 1.0),
+            f=lambda x, y: x**2 + y**2 + 3 * x * y + 2 * x - y,
+            g=lambda x, y: (2 + 2) * torch.ones_like(x),
+            atol=1 / 32,
+            rtol=1e-2,
+        ),
+        dict(
+            testcase_name="_quadratic_cell_center",
+            shape=(16, 16),
+            offset=(0.5, 0.5),
+            f=lambda x, y: 4 * x**2 + 3 * y**2 + 2 * x * y,
+            g=lambda x, y: (8.0 + 6.0) * torch.ones_like(x),
+            atol=1 / 16,
+            rtol=1e-2,
+        ),
+    )
+    def test_laplacian_dirichlet_function_nonhomogeneous_2d(
+        self, shape, offset, f, g, atol, rtol
+    ):
+        """Test Laplacian with FunctionBoundaryConditions using quadratic functions."""
+        grid = grids.Grid(shape, domain=((-1.0, 1.0), (-1.0, 1.0)))
+        mesh = grid.mesh(offset)
+
+        # Create GridVariable with function-based non-homogeneous Dirichlet BCs
+        u_data = f(*mesh)
+        expected_laplacian = trim_boundary(grids.GridVariable(g(*mesh), offset, grid))
+
+        # Use FunctionBoundaryConditions instead of discrete values
+        u = grid_variable_dirichlet_function_nonhomogeneous(u_data, offset, grid, f)
+        u = u.impose_bc()
+
+        # Compute Laplacian using finite differences
+        actual_laplacian = trim_boundary(fdm.laplacian(u))
+
+        self.assertAllClose(actual_laplacian, expected_laplacian, atol=atol, rtol=rtol)
+
+    @parameterized.named_parameters(
+        dict(
+            testcase_name="_laplacian_consistency_8x8",
+            shape=(8, 8),
+        ),
+        dict(
+            testcase_name="_laplacian_consistency_8x16",
+            shape=(8, 16),
+        ),
+        dict(
+            testcase_name="_laplacian_consistency_16x8",
+            shape=(16, 8),
+        ),
+        dict(
+            testcase_name="_laplacian_consistency_32x32",
+            shape=(32, 32),
+        ),
+    )
+    def test_laplacian_consistency(self, shape):
+        """Test that Laplacian computation is consistent across different grid resolutions."""
+        f = lambda x, y: 0.25 * (x**2 + y**2)
+        offsets = [(0, 0), (0.5, 1), (1.0, 0.5), (0.5, 0.5), (1.0, 1.0)]
+
+        for offset in offsets:
+            grid = grids.Grid(shape, domain=((0.0, 1.0), (0.0, 1.0)))
+            u_data = f(*grid.mesh(offset))
+            u = grid_variable_dirichlet_function_nonhomogeneous(u_data, offset, grid, f)
+            u = u.impose_bc()
+
+            laplacian_result = fdm.laplacian(u)
+
+            # Check interior points only where we expect Laplacian ≈ 4
+            interior_laplacian = trim_boundary(laplacian_result).data
+            expected_interior = torch.ones_like(interior_laplacian)
+
+            self.assertAllClose(
+                interior_laplacian, expected_interior, atol=1e-3, rtol=1e-2
+            )
 
 
 class FiniteDifferenceBatchTest(test_utils.TestCase):
@@ -490,30 +1026,29 @@ class FiniteDifferenceBatchTest(test_utils.TestCase):
     def test_laplacian_batch(self):
         """Test Laplacian operator with batch dimensions."""
         batch_size = 2
-        shape = (20, 20)
-        step = (0.1, 0.1)
-        grid = grids.Grid(shape, step)
+        shape = (32, 64)
+        grid = grids.Grid(shape, domain=((-1.0, 1.0), (-1.0, 1.0)))
         offset = (0, 0)
 
-        # Test function: f(x,y) = x^2 + y^2, so Laplacian should be 4
+        f = lambda x, y: x**2 + y**2
         mesh = grid.mesh(offset)
-        single_data = mesh[0] ** 2 + mesh[1] ** 2
-        batched_data = single_data.unsqueeze(0).repeat(batch_size, 1, 1)
+        single_data = f(*mesh)
+        batched_data = repeat(single_data, "h w -> b h w", b=batch_size)
 
-        u = grid_variable_periodic(batched_data, offset, grid)
+        u = grid_variable_dirichlet_function_nonhomogeneous(batched_data, offset, grid, f)
         actual_laplacian = fdm.laplacian(u)
 
         # Expected Laplacian is 4 everywhere
         expected_laplacian = 4 * torch.ones(batch_size, *shape)
 
         # Trim boundary for comparison
-        trimmed_actual = _trim_boundary(actual_laplacian)
-        trimmed_expected = _trim_boundary(
+        trimmed_actual = trim_boundary(actual_laplacian)
+        trimmed_expected = trim_boundary(
             grids.GridVariable(expected_laplacian, offset, grid)
         )
 
         self.assertAllClose(
-            trimmed_expected.data, trimmed_actual.data, atol=1e-2, rtol=1e-8
+            trimmed_expected.data, trimmed_actual.data, atol=1e-3, rtol=1e-8
         )
 
     def test_laplacian_batch_analytic(self):
@@ -533,8 +1068,8 @@ class FiniteDifferenceBatchTest(test_utils.TestCase):
         batch_laplacian = fdm.laplacian(u_batch)
 
         # Trim boundary for comparison
-        trimmed_single = _trim_boundary(single_laplacian)
-        trimmed_batch = _trim_boundary(batch_laplacian)
+        trimmed_single = trim_boundary(single_laplacian)
+        trimmed_batch = trim_boundary(batch_laplacian)
 
         for i in range(batch_size):
             self.assertAllClose(
@@ -571,8 +1106,8 @@ class FiniteDifferenceBatchTest(test_utils.TestCase):
         expected_divergence = 2 * torch.ones(batch_size, *shape)
 
         # Trim boundary for comparison
-        trimmed_actual = _trim_boundary(actual_divergence)
-        trimmed_expected = _trim_boundary(
+        trimmed_actual = trim_boundary(actual_divergence)
+        trimmed_expected = trim_boundary(
             grids.GridVariable(expected_divergence, (0, 0), grid)
         )
 
@@ -580,45 +1115,56 @@ class FiniteDifferenceBatchTest(test_utils.TestCase):
             trimmed_expected.data, trimmed_actual.data, atol=1e-2, rtol=1e-8
         )
 
-    def test_curl_2d_batch(self):
+    @parameterized.named_parameters(
+        dict(
+            testcase_name="_solenoidal_8x8",
+            shape=(8, 8),
+            offsets=((0.5, 0), (0, 0.5)),
+            f=lambda x, y: (y, -x),
+            g=lambda x, y: -2 * torch.ones_like(x),
+            bc_u=((None, None), (torch.zeros(8), torch.ones(8))),
+            bc_v=((torch.zeros(8), -torch.ones(8)), (None, None)),
+        ),
+        dict(
+            testcase_name="_solenoidal_32x32",
+            shape=(32, 32),
+            offsets=((0.5, 0), (0, 0.5)),
+            f=lambda x, y: (y, -x),
+            g=lambda x, y: -2 * torch.ones_like(x),
+            bc_u=((None, None), (torch.zeros(32), torch.ones(32))),
+            bc_v=((torch.zeros(32), -torch.ones(32)), (None, None)),
+        ),
+        dict(
+            testcase_name="_wikipedia_example_2d_21x21",
+            shape=(21, 21),
+            offsets=((0.5, 0), (0, 0.5)),
+            f=lambda x, y: (torch.ones_like(x), -(x**2)),
+            g=lambda x, y: -2 * x,
+            bc_u=((None, None), (torch.ones(21), torch.ones(21))),
+            bc_v=((torch.zeros(21), -torch.ones(21)), (None, None)),
+        ),
+    )
+    def test_curl_2d_batch(self, shape, offsets, f, g, bc_u, bc_v):
         """Test 2D curl operator with batch dimensions."""
         batch_size = 2
-        shape = (20, 20)
-        step = (0.1, 0.1)
-        grid = grids.Grid(shape, step)
+        grid = grids.Grid(shape, domain=((0, 1), (0, 1)))
         offsets = ((0.5, 0), (0, 0.5))
 
-        # Test vector field: v = (-y, x), so curl should be 2
-        mesh_x = grid.mesh(offsets[0])
-        mesh_y = grid.mesh(offsets[1])
+        v = grid_variable_vector_batch_from_functions(
+            grid, offsets, f, bc_u, bc_v, batch_size=batch_size
+        )
 
-        # Create batched vector components
-        vx_single = -mesh_x[1]  # -y component
-        vy_single = mesh_y[0]  # x component
-
-        vx_batched = repeat(vx_single, "h w -> b h w", b=batch_size)
-        vy_batched = repeat(vy_single, "h w -> b h w", b=batch_size)
-
-        v = [
-            grid_variable_periodic(vx_batched, offsets[0], grid),
-            grid_variable_periodic(vy_batched, offsets[1], grid),
-        ]
-
-        actual_curl = fdm.curl_2d(v)
+        actual_curl = trim_boundary(fdm.curl_2d(v))
 
         # Expected curl is 2 everywhere
         result_offset = (0.5, 0.5)
-        expected_curl = 2 * torch.ones(batch_size, *shape)
-
-        # Trim boundary for comparison
-        trimmed_actual = _trim_boundary(actual_curl)
-        trimmed_expected = _trim_boundary(
+        expected_curl = g(*grid.mesh(result_offset))
+        expected_curl = repeat(expected_curl, "h w -> b h w", b=batch_size)
+        expected_curl = trim_boundary(
             grids.GridVariable(expected_curl, result_offset, grid)
         )
 
-        self.assertAllClose(
-            trimmed_expected.data, trimmed_actual.data, atol=1e-2, rtol=1e-8
-        )
+        self.assertAllClose(actual_curl.data, expected_curl.data, atol=1e-2, rtol=1e-8)
 
     def test_batch_consistency_across_operations(self):
         """Test that batch operations are consistent across different batch sizes."""
@@ -643,6 +1189,240 @@ class FiniteDifferenceBatchTest(test_utils.TestCase):
             for i in range(1, batch_size):
                 self.assertAllClose(grad_x.data[0], grad_x.data[i])
                 self.assertAllClose(grad_y.data[0], grad_y.data[i])
+
+    @parameterized.named_parameters(
+        dict(
+            testcase_name="_quadratic_1_batch",
+            batch_size=3,
+            shape=(16, 16),
+            offset=(1, 0),
+            f=lambda x, y: x**2 + 2 * y**2 + x * y,
+            g=lambda x, y: (2 + 4) * torch.ones_like(x),
+            atol=1 / 16,
+            rtol=1e-2,
+        ),
+        dict(
+            testcase_name="_quadratic_2_batch",
+            batch_size=4,
+            shape=(32, 32),
+            offset=(0, 1),
+            f=lambda x, y: 3 * x**2 + y**2 - x * y,
+            g=lambda x, y: (6 + 2) * torch.ones_like(x),
+            atol=1 / 32,
+            rtol=1e-2,
+        ),
+        dict(
+            testcase_name="_quadratic_and_trig_batch",
+            batch_size=2,
+            shape=(32, 32),
+            offset=(1, 0),
+            f=lambda x, y: 4 * x**2
+            + 3 * y**2
+            + 2 * x * y
+            + torch.sin(torch.pi * x) * torch.sin(torch.pi * y)/2,
+            g=lambda x, y: 14 * torch.ones_like(x)
+            - torch.pi**2 * torch.sin(torch.pi * x) * torch.sin(torch.pi * y),
+            atol=1 / 32,
+            rtol=1e-2,
+        ),
+    )
+    def test_laplacian_dirichlet_function_nonhomogeneous_batch(
+        self, batch_size, shape, offset, f, g, atol, rtol
+    ):
+        """Test Laplacian with FunctionBoundaryConditions using quadratic functions with batch dimensions."""
+        grid = grids.Grid(shape, domain=((-1.0, 1.0), (-1.0, 1.0)))
+        mesh = grid.mesh(offset)
+
+        # Create batched data by repeating the same function
+        single_u_data = f(*mesh)
+        batched_u_data = repeat(single_u_data, "h w -> b h w", b=batch_size)
+
+        single_expected = g(*mesh)
+        batched_expected = repeat(single_expected, "h w -> b h w", b=batch_size)
+        expected_laplacian = trim_boundary(
+            grids.GridVariable(batched_expected, offset, grid)
+        )
+
+        # Use FunctionBoundaryConditions with batched data
+        u = grid_variable_dirichlet_function_nonhomogeneous(
+            batched_u_data, offset, grid, f
+        )
+        u = u.impose_bc()
+
+        # Compute Laplacian using finite differences
+        actual_laplacian = trim_boundary(fdm.laplacian(u))
+
+        # Check that batch dimension is preserved
+        self.assertEqual(actual_laplacian.data.shape[0], batch_size)
+
+        # Check accuracy for each batch element
+        self.assertAllClose(
+            actual_laplacian.data, expected_laplacian.data, atol=atol, rtol=rtol
+        )
+
+    @parameterized.named_parameters(
+        dict(
+            testcase_name="_linear_discrete_bc_batch",
+            batch_size=2,
+            shape=(8, 8),
+            offset=(0, 0),
+            f=lambda x, y: x + 2 * y,
+            g=lambda x, y: torch.zeros_like(x),
+            bc_values_func=lambda: (
+                (torch.linspace(0, 2, 9)[:-1], torch.linspace(1, 3, 9)[:-1]),
+                (torch.linspace(0, 1, 9)[:-1], torch.linspace(2, 3, 9)[:-1]),
+            ),
+            atol=1e-3,
+            rtol=1e-10,
+        ),
+        dict(
+            testcase_name="_constant_discrete_bc_batch",
+            batch_size=4,
+            shape=(12, 12),
+            offset=(1, 1),
+            f=lambda x, y: torch.ones_like(x),
+            g=lambda x, y: torch.zeros_like(x),
+            bc_values_func=lambda: (
+                (torch.ones(12), torch.ones(12)),
+                (torch.ones(12), torch.ones(12)),
+            ),
+            atol=1e-3,
+            rtol=1e-10,
+        ),
+        dict(
+            testcase_name="_quadratic_discrete_bc_batch",
+            batch_size=3,
+            shape=(16, 16),
+            offset=(0.5, 0.5),
+            f=lambda x, y: x**2 + y**2,
+            g=lambda x, y: 4 * torch.ones_like(x),
+            bc_values_func=lambda: (
+                (torch.linspace(0, 2, 17)[1:-1], torch.linspace(1, 3, 17)[1:-1]),
+                (torch.linspace(0, 1, 17)[1:-1], torch.linspace(1, 2, 17)[1:-1]),
+            ),
+            atol=1e-2,
+            rtol=1e-2,
+        ),
+    )
+    def test_laplacian_dirichlet_discrete_nonhomogeneous_batch(
+        self, batch_size, shape, offset, f, g, bc_values_func, atol, rtol
+    ):
+        """Test Laplacian with discrete non-homogeneous Dirichlet BCs with batch dimensions."""
+        grid = grids.Grid(shape, domain=((0.0, 1.0), (0.0, 1.0)))
+        mesh = grid.mesh(offset)
+
+        # Create batched data
+        single_u_data = f(*mesh)
+        batched_u_data = repeat(single_u_data, "h w -> b h w", b=batch_size)
+
+        single_expected = g(*mesh)
+        batched_expected = repeat(single_expected, "h w -> b h w", b=batch_size)
+        expected_laplacian = trim_boundary(
+            grids.GridVariable(batched_expected, offset, grid)
+        )
+
+        # Get boundary condition values
+        bc_values = bc_values_func()
+
+        # Create GridVariable with batched non-homogeneous Dirichlet BCs
+        u = grid_variable_dirichlet_nonhomogeneous(
+            batched_u_data, offset, grid, bc_values
+        )
+        u = u.impose_bc()
+
+        # Compute Laplacian using finite differences
+        actual_laplacian = trim_boundary(fdm.laplacian(u))
+
+        # Check that batch dimension is preserved
+        self.assertEqual(actual_laplacian.data.shape[0], batch_size)
+
+        # Check accuracy
+        self.assertAllClose(
+            actual_laplacian.data, expected_laplacian.data, atol=atol, rtol=rtol
+        )
+
+    @parameterized.named_parameters(
+        dict(
+            testcase_name="_quadratic_gradient_batch",
+            batch_size=2,
+            shape=(16, 16),
+            offset=(0, 0),
+            f=lambda x, y: x**2 + 2 * y**2,
+            fx=lambda x, y: 2 * x,
+            fy=lambda x, y: 4 * y,
+        ),
+        dict(
+            testcase_name="_mixed_quadratic_gradient_batch",
+            batch_size=3,
+            shape=(32, 32),
+            offset=(0.5, 1),
+            f=lambda x, y: 3 * x**2 + y**2 + x * y,
+            fx=lambda x, y: 6 * x + y,
+            fy=lambda x, y: 2 * y + x,
+        ),
+        dict(
+            testcase_name="_cubic_gradient_batch",
+            batch_size=4,
+            shape=(24, 24),
+            offset=(1, 0.5),
+            f=lambda x, y: x**3 + y**3 + x * y**2,
+            fx=lambda x, y: 3 * x**2 + y**2,
+            fy=lambda x, y: 3 * y**2 + 2 * x * y,
+        ),
+    )
+    def test_central_difference_function_nonhomogeneous_batch(
+        self, batch_size, shape, offset, f, fx, fy
+    ):
+        """Test central difference with FunctionBoundaryConditions with batch dimensions."""
+        grid = grids.Grid(shape, domain=((0.0, 1.0), (0.0, 1.0)))
+        x, y = grid.mesh(offset)
+        h = max(grid.step)
+
+        # Create batched data
+        single_u_data = f(x, y)
+        batched_u_data = repeat(single_u_data, "h w -> b h w", b=batch_size)
+
+        single_fx_data = fx(x, y)
+        single_fy_data = fy(x, y)
+        batched_fx_data = repeat(single_fx_data, "h w -> b h w", b=batch_size)
+        batched_fy_data = repeat(single_fy_data, "h w -> b h w", b=batch_size)
+
+        u = grid_variable_dirichlet_function_nonhomogeneous(
+            batched_u_data, offset, grid, f
+        )
+        u = u.impose_bc()
+
+        expected_grad_x = grids.GridVariable(batched_fx_data, offset, grid)
+        expected_grad_y = grids.GridVariable(batched_fy_data, offset, grid)
+
+        # Check that gradients are reasonable in interior
+        interior_grad_x = trim_boundary(fdm.central_difference(u, dim=0))
+        interior_grad_y = trim_boundary(fdm.central_difference(u, dim=1))
+
+        # Get expected gradients at interior points
+        expected_grad_x_interior = trim_boundary(expected_grad_x)
+        expected_grad_y_interior = trim_boundary(expected_grad_y)
+
+        # Check that batch dimension is preserved
+        self.assertEqual(interior_grad_x.data.shape[0], batch_size)
+        self.assertEqual(interior_grad_y.data.shape[0], batch_size)
+
+        # Use relaxed tolerance for finite difference approximation
+        self.assertAllClose(
+            interior_grad_x.data, expected_grad_x_interior.data, atol=6 * h, rtol=h
+        )
+        self.assertAllClose(
+            interior_grad_y.data, expected_grad_y_interior.data, atol=6 * h, rtol=h
+        )
+
+        # Test batch consistency: each batch element should be identical
+        for i in range(1, batch_size):
+            self.assertAllClose(
+                interior_grad_x.data[0], interior_grad_x.data[i], atol=1e-12, rtol=1e-15
+            )
+            self.assertAllClose(
+                interior_grad_y.data[0], interior_grad_y.data[i], atol=1e-12, rtol=1e-15
+            )
 
 
 if __name__ == "__main__":
