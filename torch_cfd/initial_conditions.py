@@ -46,9 +46,8 @@ def wrap_velocities(
     velocity = tuple(
         GridVariable(u, offset, grid) for u, offset in zip(v, grid.cell_faces)
     )
-    return GridVariableVector(
-        tuple(bc.impose_bc(u) for u, bc in zip(velocity, bcs))
-    ).to(device)
+    velocity = tuple(bc.impose_bc(u) for u, bc in zip(velocity, bcs))
+    return GridVariableVector(velocity).to(device)
 
 
 def wrap_vorticity(
@@ -247,7 +246,7 @@ def filtered_vorticity_field(
 def velocity_field(
     velocity_fns: Union[VelocityFns, VelocityFn],
     grid: Grid,
-    velocity_bc: Optional[Sequence[BoundaryConditions]] = None,
+    velocity_bc: Optional[Tuple[BoundaryConditions,...]] = None,
     batch_size: int = 1,
     noise: float = 0.0,
     random_state: int = 0,

@@ -31,9 +31,11 @@ Grid = grids.Grid
 GridVariable = grids.GridVariable
 GridVariableVector = grids.GridVariableVector
 FluxInterpFn = Callable[[GridVariable, GridVariableVector, float], GridVariable]
+BoundaryConditions = boundaries.BoundaryConditions
 
 
 def default(value, d):
+    """Returns `value` if it is not None, otherwise returns `d` which is the default value."""
     return d if value is None else value
 
 
@@ -360,22 +362,17 @@ class TVDInterpolation(nn.Module):
         self,
         grid: Grid,
         target_offset: Tuple[float, ...],
-        low_interp: FluxInterpFn = None,
-        high_interp: FluxInterpFn = None,
+        low_interp: Optional[FluxInterpFn] = None,
+        high_interp: Optional[FluxInterpFn] = None,
         limiter: Callable = van_leer_limiter,
     ):
         super().__init__()
         self.grid = grid
-        self.low_interp = (
-            Upwind(grid, target_offset=target_offset)
-            if low_interp is None
-            else low_interp
+        self.low_interp = default(low_interp, Upwind(grid, target_offset=target_offset))
+        self.high_interp = default(
+            high_interp, LaxWendroff(grid, target_offset=target_offset)
         )
-        self.high_interp = (
-            LaxWendroff(grid, target_offset=target_offset)
-            if high_interp is None
-            else high_interp
-        )
+
         self.limiter = limiter
         self.target_offset = target_offset
 
@@ -394,28 +391,28 @@ class TVDInterpolation(nn.Module):
         Returns:
             Interpolated scalar field c to a target offset using Van Leer flux limiting, which uses a combination of high and low order methods to produce monotonic interpolation method.
         """
-        for axis, axis_offset in enumerate(self.target_offset):
+        for dim, offset in enumerate(self.target_offset):
             interpolation_offset = tuple(
                 [
-                    c_offset if i != axis else axis_offset
+                    c_offset if i != dim else offset
                     for i, c_offset in enumerate(c.offset)
                 ]
             )
             if interpolation_offset != c.offset:
-                if interpolation_offset[axis] - c.offset[axis] != 0.5:
+                if interpolation_offset[dim] - c.offset[dim] != 0.5:
                     raise NotImplementedError(
                         "Only forward interpolation to control volume faces is supported."
                     )
                 c_low = self.low_interp(c, v, dt)
                 c_high = self.high_interp(c, v, dt)
-                c_left = c.shift(-1, axis).data
-                c_right = c.shift(1, axis).data
-                c_next_right = c.shift(2, axis).data
+                c_left = c.shift(-1, dim).data
+                c_right = c.shift(1, dim).data
+                c_next_right = c.shift(2, dim).data
                 pos_r = safe_div(c - c_left, c_right - c)
                 neg_r = safe_div(c_next_right - c_right, c_right - c)
                 pos_phi = self.limiter(pos_r).data
                 neg_phi = self.limiter(neg_r).data
-                u = v[axis]
+                u = v[dim]
                 phi = torch.where(u > 0, pos_phi, neg_phi)
                 interpolated = c_low - (c_low - c_high) * phi
                 c = GridVariable(interpolated.data, interpolation_offset, c.grid, c.bc)
@@ -455,8 +452,8 @@ class AdvectionBase(nn.Module):
         self,
         grid: Grid,
         offset: Tuple[float, ...],
-        bc_c: boundaries.BoundaryConditions,
-        bc_v: Tuple[boundaries.BoundaryConditions, ...],
+        bc_c: Optional[BoundaryConditions] = None,
+        bc_v: Optional[Tuple[boundaries.BoundaryConditions, ...]] = None,
         limiter: Optional[Callable] = None,
     ) -> None:
         super().__init__()
@@ -538,13 +535,8 @@ class AdvectionLinear(AdvectionBase):
         self,
         grid: Grid,
         offset=(0.5, 0.5),
-        bc_c: boundaries.BoundaryConditions = boundaries.periodic_boundary_conditions(
-            ndim=2
-        ),
-        bc_v: Tuple[boundaries.BoundaryConditions, ...] = (
-            boundaries.periodic_boundary_conditions(ndim=2),
-            boundaries.periodic_boundary_conditions(ndim=2),
-        ),
+        bc_c: Optional[BoundaryConditions] = None,
+        bc_v: Optional[Tuple[boundaries.BoundaryConditions, ...]] = None,
         **kwargs,
     ):
         super().__init__(grid, offset, bc_c, bc_v)
@@ -578,13 +570,8 @@ class AdvectionUpwind(AdvectionBase):
         self,
         grid: Grid,
         offset: Tuple[float, ...] = (0.5, 0.5),
-        bc_c: boundaries.BoundaryConditions = boundaries.periodic_boundary_conditions(
-            ndim=2
-        ),
-        bc_v: Tuple[boundaries.BoundaryConditions, ...] = (
-            boundaries.periodic_boundary_conditions(ndim=2),
-            boundaries.periodic_boundary_conditions(ndim=2),
-        ),
+        bc_c: Optional[BoundaryConditions] = None,
+        bc_v: Optional[Tuple[boundaries.BoundaryConditions, ...]] = None,
         **kwargs,
     ):
         super().__init__(grid, offset, bc_c, bc_v)
@@ -617,13 +604,8 @@ class AdvectionVanLeer(AdvectionBase):
         self,
         grid: Grid,
         offset: Tuple[float, ...] = (0.5, 0.5),
-        bc_c: boundaries.BoundaryConditions = boundaries.periodic_boundary_conditions(
-            ndim=2
-        ),
-        bc_v: Tuple[boundaries.BoundaryConditions, ...] = (
-            boundaries.periodic_boundary_conditions(ndim=2),
-            boundaries.periodic_boundary_conditions(ndim=2),
-        ),
+        bc_c: Optional[BoundaryConditions] = None,
+        bc_v: Optional[Tuple[boundaries.BoundaryConditions, ...]] = None,
         limiter: Callable = van_leer_limiter,
         **kwargs,
     ):
@@ -672,16 +654,21 @@ class ConvectionVector(nn.Module):
         self,
         grid: Grid,
         offsets: Tuple[Tuple[float, ...], ...] = ((1.0, 0.5), (0.5, 1.0)),
-        bcs: Tuple[boundaries.BoundaryConditions, ...] = (
-            boundaries.periodic_boundary_conditions(ndim=2),
-            boundaries.periodic_boundary_conditions(ndim=2),
-        ),
+        bcs: Optional[Tuple[boundaries.BoundaryConditions, ...]] = None,
         advect: type[nn.Module] = AdvectionVanLeer,
         limiter: Callable = van_leer_limiter,
         **kwargs,
     ):
         super().__init__()
-
+        self.grid = grid
+        self.offsets = offsets
+        bcs = default(
+            bcs,
+            tuple(
+                boundaries.periodic_boundary_conditions(ndim=grid.ndim)
+                for _ in range(grid.ndim)
+            ),
+        )
         self.advect = nn.ModuleList(
             advect(
                 grid=grid,
