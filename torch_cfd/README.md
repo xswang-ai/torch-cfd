@@ -8,6 +8,8 @@
 - [ ] rewrite `shift` and `pad` using `torch.roll`.
 - [x] support for function-valued boundary conditions.
 - [ ] change the multigrid implementation using convolution kernel.
+- [ ] add a simulation script similar to `funcutils.trajectory` but does not rely on flattening pytrees.
+- [ ] add several validation problems and tests (Taylor-Green, pressure gradient flow)
 
 # Changelog
 

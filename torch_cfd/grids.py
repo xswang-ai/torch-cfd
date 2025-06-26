@@ -44,7 +44,8 @@ class BCType:
     NONE = None
 
 
-BCValues = Union[torch.Tensor, None]
+BCValue = Union[torch.Tensor, None]
+BCValues = Tuple[BCValue, BCValue] | Sequence[Tuple[BCValue, BCValue]]
 
 
 class Padding:
@@ -113,7 +114,7 @@ class Grid:
             domain = tuple((float(lower), float(upper)) for lower, upper in domain)
         else:
             if step is None:
-                step = 1
+                step = 1.0
             if isinstance(step, numbers.Number):
                 step = (step,) * self.ndim
             elif len(step) != self.ndim:
@@ -354,7 +355,7 @@ class BoundaryConditions:
     """
 
     types: Tuple[Tuple[str, str], ...]
-    bc_values: Tuple[Tuple[BCValues, BCValues], ...]
+    bc_values: Union[float, BCValue, Tuple[Tuple[BCValue, BCValue], ...]]
     ndim: int
 
     def shift(
@@ -415,6 +416,12 @@ class BoundaryConditions:
         raise NotImplementedError(
             "impose_bc() not implemented in BoundaryConditions base class."
         )
+    
+    def impose_immersed_bc(self, u: GridVariable) -> GridVariable:
+        """Impose immersed boundary conditions on the grid variable."""
+        raise NotImplementedError(
+            "impose_immersed_bc() not implemented in BoundaryConditions base class."
+        )
 
     def pad_and_impose_bc(
         self,
@@ -453,13 +460,10 @@ def _binary_method(name, op):
                 raise ValueError(
                     f"Cannot operate on arrays with different grids: {self.grid} vs {other.grid}"
                 )
-            if self.bc is None or other.bc is None or self.bc != other.bc:
-                return GridVariable(op(self.data, other.data), self.offset, self.grid)
             return GridVariable(
-                op(self.data, other.data), self.offset, self.grid, self.bc
-            )
+                op(self.data, other.data), self.offset, self.grid)
         elif isinstance(other, _HANDLED_TYPES):
-            return GridVariable(op(self.data, other), self.offset, self.grid, self.bc)
+            return GridVariable(op(self.data, other), self.offset, self.grid)
 
         return NotImplemented
 
@@ -480,13 +484,9 @@ def _reflected_binary_method(name, op):
                 raise ValueError(
                     f"Cannot operate on arrays with different grids: {self.grid} vs {other.grid}"
                 )
-            if self.bc is None or other.bc is None or self.bc != other.bc:
-                return GridVariable(op(other.data, self.data), self.offset, self.grid)
-            return GridVariable(
-                op(other.data, self.data), self.offset, self.grid, self.bc
-            )
+            return GridVariable(op(other.data, self.data), self.offset, self.grid)
         elif isinstance(other, _HANDLED_TYPES):
-            return GridVariable(op(other, self.data), self.offset, self.grid, self.bc)
+            return GridVariable(op(other, self.data), self.offset, self.grid)
 
         return NotImplemented
 
@@ -713,11 +713,8 @@ class GridVariable(GridTensorOpsMixin):
 
     def __getitem__(self, index):
         """Allows indexing into the GridVariable like a tensor."""
-        # This is necessary to ensure that the offset and grid are preserved
-        # when slicing the data, bc will be removed.
+        # when slicing only return the tensor data
         new_data = self.data[index]
-        if isinstance(new_data, torch.Tensor):
-            return GridVariable(new_data, self.offset, self.grid)
         return new_data
 
     def __setitem__(self, index, value):
@@ -785,11 +782,11 @@ class GridVariable(GridTensorOpsMixin):
             *[x for x in args if isinstance(x, GridVariable)]
         )
         grid = consistent_grid_arrays(*[x for x in args if isinstance(x, GridVariable)])
-        bc = consistent_bc_arrays(*[x for x in args if isinstance(x, GridVariable)])
+        # no bc here because functional operations removes the boundary conditions
         if isinstance(result, tuple):
-            return tuple(GridVariable(r, offset, grid, bc) for r in result)
+            return tuple(GridVariable(r, offset, grid) for r in result)
         else:
-            return GridVariable(result, offset, grid, bc)
+            return GridVariable(result, offset, grid)
 
     def shift(
         self,
@@ -893,6 +890,18 @@ class GridVariable(GridTensorOpsMixin):
         """
         assert self.bc is not None, "Boundary conditions must be set to impose BC."
         return self.bc.impose_bc(self, mode)
+    
+    def impose_immersed_bc(self) -> GridVariable:
+        """Apply immersed boundary conditions to the GridVariable.
+    
+        This method enforces immersed boundary conditions by applying a mask that distinguishes between fluid and solid regions within the computational domain. In solid regions (where the mask is 0.0), the values are set to the prescribed immersed boundary condition value. In fluid regions (where the mask is 1.0), the original values are preserved.
+    
+    Returns:
+        GridVariable: A new GridVariable with immersed boundary masks applied.
+    
+        """
+        assert self.bc is not None, "Boundary conditions must be set to impose immersed BC."
+        return self.bc.impose_immersed_bc(self)
 
     def enforce_edge_bc(self, *args) -> GridVariable:
         """Returns the GridVariable with edge BC enforced, if applicable.
@@ -919,6 +928,8 @@ class GridVariable(GridTensorOpsMixin):
                         all_slice[dim] = -boundary_side
                         data[tuple(all_slice)] = values[boundary_side]
         return GridVariable(data, self.offset, self.grid, self.bc)
+    
+
 
 
 class GridVectorBase(tuple, Generic[T]):
@@ -930,7 +941,7 @@ class GridVectorBase(tuple, Generic[T]):
     def __new__(cls, elements: Sequence[T]):
         if not all(isinstance(x, cls._element_type()) for x in elements):
             raise TypeError(
-                f"All elements must be instances of {cls._element_type().__name__}."
+                f"All elements must be instances of {cls._element_type().__name__}. Got {[type(x) for x in elements]}."
             )
         return super().__new__(cls, elements)
 
@@ -972,16 +983,18 @@ class GridVectorBase(tuple, Generic[T]):
     __imul__ = __rmul__ = __mul__
 
     def __truediv__(self, x):
-        if not isinstance(x, _HANDLED_TYPES + (self._element_type(),)):
+        if not isinstance(x, _HANDLED_TYPES):
             return NotImplemented
         return self.__class__([v / x for v in self])
+
+    __itruediv__ = __truediv__
 
     def __rtruediv__(self, x):
         """
         __rdiv__ does not really make sense for GridVariableVector, but is
         implemented for consistency.
         """
-        if not isinstance(x, _HANDLED_TYPES + (self._element_type(),)):
+        if not isinstance(x, _HANDLED_TYPES):
             return NotImplemented
         return self.__class__([x / v for v in self])
 
@@ -1109,7 +1122,7 @@ def pad(
     bc: Optional[BoundaryConditions] = None,
     mode: Optional[str] = Padding.EXTEND,
     bc_types: Optional[Tuple[str, str]] = None,
-    values: Optional[Union[BCValues, Sequence[BCValues]]] = None,
+    values: Optional[Union[BCValue, BCValues]] = None,
 ) -> GridVariable:
     """Pad a GridVariable by `padding`.
 
@@ -1347,9 +1360,7 @@ def expand_dims_pad(
     inputs: torch.Tensor,
     pad: Sequence[Tuple[int, int]],
     mode: str = "constant",
-    constant_values: Union[
-        float, Tuple[BCValues, BCValues], Sequence[Tuple[BCValues, BCValues]]
-    ] = 0,
+    constant_values: Union[float, BCValues] = 0,
     **kwargs,
 ) -> torch.Tensor:
     """
@@ -1404,7 +1415,7 @@ def expand_dims_pad(
 def _constant_pad_tensor(
     inputs: torch.Tensor,
     pad: Sequence[Tuple[int, int]],
-    constant_values: Sequence[Tuple[BCValues, BCValues]],
+    constant_values: Sequence[Tuple[BCValue, BCValue]],
     **kwargs,
 ) -> torch.Tensor:
     """
@@ -1477,7 +1488,7 @@ def _constant_pad_tensor(
 
 
 def _create_boundary_tensor(
-    value: Union[BCValues, float],
+    value: Union[BCValue, float],
     target_shape: Tuple[int, ...],
     pad_dim: int,
     pad_width: int,

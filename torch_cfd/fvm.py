@@ -18,7 +18,7 @@
 
 from __future__ import annotations
 
-from typing import Callable, Dict, List, Optional, Sequence, Tuple, Union
+from typing import Callable, Dict, List, Optional, Tuple, Union
 
 import torch
 import torch.nn as nn
@@ -26,7 +26,7 @@ import torch.nn as nn
 import torch_cfd.finite_differences as fdm
 from torch_cfd import advection, boundaries, forcings, grids, solvers
 
-
+default = advection.default
 Grid = grids.Grid
 GridVariable = grids.GridVariable
 GridVariableVector = grids.GridVariableVector
@@ -83,7 +83,7 @@ class RKStepper(nn.Module):
         method: String name of built-in RK method if tableau not provided
 
     Examples:
-        stepper = RKStepper.from_name("classic_rk4", equation, ...)
+        stepper = RKStepper.from_method("classic_rk4", ...)
     """
 
     _METHOD_MAP = {
@@ -181,7 +181,11 @@ class RKStepper(nn.Module):
         return cls(method=method, requires_grad=requires_grad, **kwargs)
 
     def forward(
-        self, u0: GridVariableVector, dt: float, equation: ProjectionExplicitODE
+        self,
+        u0: GridVariableVector,
+        dt: float,
+        equation: ProjectionExplicitODE,
+        t: float = 0.0,
     ) -> Tuple[GridVariableVector, GridVariable]:
         """Perform one time step.
 
@@ -207,7 +211,7 @@ class RKStepper(nn.Module):
 
         # First stage
         u[0] = u0
-        k[0] = equation.explicit_terms(u0, dt)
+        k[0] = equation.explicit_terms(u0, dt, t)
 
         # Intermediate stages
         for i in range(1, num_steps):
@@ -219,7 +223,7 @@ class RKStepper(nn.Module):
 
             u_star = wrap_field_same_bcs(u_star, u0)
             u[i], _ = equation.pressure_projection(u_star)
-            k[i] = equation.explicit_terms(u[i], dt)
+            k[i] = equation.explicit_terms(u[i], dt, t + i * dt / num_steps)
 
         u_star = GridVariableVector(tuple(v.clone() for v in u0))
         for j in range(num_steps):
@@ -249,6 +253,7 @@ class PressureProjection(nn.Module):
             grid: Grid object describing the spatial domain.
             bc: Boundary conditions for the Laplacian operator (for pressure).
             dtype: Tensor data type. For consistency purpose.
+            solver: Solver to use for pressure projection. Can be a string ('cg', 'pseudoinverse', 'multigrid') name or a Solver instance.
             implementation: One of ['fft', 'rfft', 'matmul'].
             circulant: If True, bc is periodical
             laplacians: Precomputed Laplacian operators. If None, they are computed from the grid during initiliazation.
@@ -311,14 +316,18 @@ class PressureProjection(nn.Module):
             ).to(v.device)
             self.q0 = q0
         _ = grids.consistent_grid(self.grid, *v)
-        pressure_bc = boundaries.get_pressure_bc_from_velocity(v)
+        if self.bc is not None:
+            pressure_bc = self.bc
+        else:
+            pressure_bc = boundaries.get_pressure_bc_from_velocity(v)
 
         rhs = fdm.divergence(v)
         rhs_transformed = self.rhs_transform(rhs, pressure_bc)
         rhs_inv = solver.solve(rhs_transformed, q0.data)
         q = GridVariable(rhs_inv, rhs.offset, rhs.grid)
         q = pressure_bc.impose_bc(q)
-        q_grad = fdm.forward_difference(q)
+        q_grad = fdm.forward_difference(q) 
+        # forward diff has to be used to match the offset of the velocity field
         v_projected = GridVariableVector(
             tuple(u.bc.impose_bc(u - q_g) for u, q_g in zip(v, q_grad))
         )
@@ -328,28 +337,28 @@ class PressureProjection(nn.Module):
 
     @staticmethod
     def rhs_transform(
-        u: GridVariable,
+        f: GridVariable,
         bc: BoundaryConditions,
     ) -> torch.Tensor:
         """Transform the RHS of pressure projection equation for stability."""
-        u_data = u.data  # (b, n, m) or (n, m)
-        ndim = u.grid.ndim
+        rhs = f.data  # (b, n, m) or (n, m)
+        ndim = f.grid.ndim
         for dim in range(ndim):
             if (
                 bc.types[dim][0] == boundaries.BCType.NEUMANN
                 and bc.types[dim][1] == boundaries.BCType.NEUMANN
             ):
                 # Check if we have batched data
-                if u_data.ndim > ndim:
+                if rhs.ndim > ndim:
                     # For batched data, calculate mean separately for each batch
                     # Keep the batch dimension, reduce over grid dimensions
                     dims = tuple(range(-ndim, 0))
-                    mean = torch.mean(u_data, dim=dims, keepdim=True)
+                    mean = torch.mean(rhs, dim=dims, keepdim=True)
                 else:
                     # For non-batched data, calculate global mean
-                    mean = torch.mean(u_data)
-                u_data = u_data - mean
-        return u_data
+                    mean = torch.mean(rhs)
+                rhs = rhs - mean
+        return rhs
 
 
 class NavierStokes2DFVMProjection(ProjectionExplicitODE):
@@ -392,7 +401,7 @@ class NavierStokes2DFVMProjection(ProjectionExplicitODE):
         self,
         viscosity: float,
         grid: Grid,
-        bcs: Optional[Sequence[boundaries.BoundaryConditions]] = None,
+        bcs: Optional[Tuple[boundaries.BoundaryConditions, ...]] = None,
         drag: float = 0.0,
         density: float = 1.0,
         convection: Optional[Callable] = None,
@@ -418,32 +427,30 @@ class NavierStokes2DFVMProjection(ProjectionExplicitODE):
         self.convection = convection
         self.step_fn = step_fn
         self.pressure_proj = pressure_proj
-        self._set_pressure_bc()
-        self._set_convect()
-        self._set_pressure_projection()
+        self._initialize()
 
-    def _set_convect(self):
-        if self.convection is not None:
-            self._convect = self.convection
-        else:
-            self._convect = advection.ConvectionVector(grid=self.grid, bcs=self.bcs)
-
-    def _set_pressure_projection(self):
-        if self.pressure_proj is not None:
-            self._projection = self.pressure_proj
-            return
-        self._projection = PressureProjection(
-            grid=self.grid,
-            bc=self.pressure_bc,
+    def _initialize(self):
+        self.bcs = default(
+            self.bcs,
+            tuple(
+                [
+                    boundaries.periodic_boundary_conditions(ndim=self.grid.ndim)
+                    for _ in range(self.grid.ndim)
+                ]
+            ),
         )
-
-    def _set_pressure_bc(self):
-        if self.bcs is None:
-            self.bcs = (
-                boundaries.periodic_boundary_conditions(ndim=self.grid.ndim),
-                boundaries.periodic_boundary_conditions(ndim=self.grid.ndim),
-            )
         self.pressure_bc = boundaries.get_pressure_bc_from_velocity_bc(bcs=self.bcs)
+        self._projection = default(
+            self.pressure_proj,
+            PressureProjection(
+                grid=self.grid,
+                bc=self.pressure_bc,
+            ),
+        )
+        self._convect = default(
+            self.convection, advection.ConvectionVector(grid=self.grid, bcs=self.bcs)
+        )
+        self._step_fn = default(self.step_fn, RKStepper.from_method("heun_rk2"))
 
     def _diffusion(self, v: GridVariableVector) -> GridVariableVector:
         """Returns the diffusion term for the velocity field."""
@@ -451,16 +458,18 @@ class NavierStokes2DFVMProjection(ProjectionExplicitODE):
         lapv = GridVariableVector(tuple(alpha * fdm.laplacian(u) for u in v))
         return lapv
 
-    def _explicit_terms(self, v, dt, **kwargs):
+    def _explicit_terms(
+        self, v: GridVariableVector, dt: float, t: Optional[float] = 0.0, **kwargs
+    ):
         dv_dt = self._convect(v, v, dt)
         grid = self.grid
         density = self.density
         forcing = self.forcing
         dv_dt += self._diffusion(v)
         if forcing is not None:
-            dv_dt += GridVariableVector(forcing(grid, v)) / density
+            dv_dt += GridVariableVector(forcing(grid, v, t)) / density
         if self.drag > 0.0:
-            dv_dt += -self.drag * v.array
+            dv_dt -=  v * self.drag
         return dv_dt
 
     def explicit_terms(self, *args, **kwargs):
@@ -469,7 +478,9 @@ class NavierStokes2DFVMProjection(ProjectionExplicitODE):
     def pressure_projection(self, *args, **kwargs):
         return self._projection(*args, **kwargs)
 
-    def forward(self, u: GridVariableVector, dt: float) -> GridVariableVector:
+    def forward(
+        self, u: GridVariableVector, dt: float, t: Optional[float] = 0.0
+    ) -> GridVariableVector:
         """Perform one time step.
 
         Args:
@@ -480,4 +491,4 @@ class NavierStokes2DFVMProjection(ProjectionExplicitODE):
             Updated velocity field after one time step
         """
 
-        return self.step_fn(u, dt, self)
+        return self._step_fn(u, dt, self)
