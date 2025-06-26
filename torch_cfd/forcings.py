@@ -26,6 +26,8 @@ from torch_cfd import grids
 Grid = grids.Grid
 GridVariable = grids.GridVariable
 GridVariableVector = grids.GridVariableVector
+ScalarField = Union[GridVariable, torch.Tensor]
+VectorField = Union[GridVariableVector, Tuple[torch.Tensor, torch.Tensor]]
 
 
 def forcing_eval(eval_func):
@@ -74,7 +76,7 @@ class ForcingFn(nn.Module):
     - forcing term does not have boundary conditions, when being evaluated, it is simply added to the velocity or vorticity (with the same grid)
 
     TODO:
-    - [ ] MAC grid the components of velocity does not live on the same grid.
+    - [x] MAC grid the components of velocity does not live on the same grid.
     """
 
     def __init__(
@@ -101,24 +103,29 @@ class ForcingFn(nn.Module):
 
     @forcing_eval
     def velocity_eval(
-        self, grid: Grid, velocity: Optional[Tuple[GridVariable, GridVariable]]
-    ) -> GridVariableVector:
+        self, grid: Grid, velocity: Optional[VectorField], time: Optional[float]
+    ) -> VectorField:
         raise NotImplementedError
 
     @forcing_eval
-    def vorticity_eval(self, grid: Grid, vorticity: Optional[torch.Tensor]) -> GridVariable:
+    def vorticity_eval(
+        self, grid: Grid, vorticity: Optional[ScalarField], time: Optional[float]
+    ) -> ScalarField:
         raise NotImplementedError
 
     def forward(
         self,
-        grid: Optional[Union[Grid, Tuple[Grid, Grid]]] = None,
-        velocity: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
-        vorticity: Optional[torch.Tensor] = None,
-    ) -> Union[GridVariable, GridVariableVector]:
+        grid: Optional[Grid] = None,
+        velocity: Optional[VectorField] = None,
+        vorticity: Optional[ScalarField] = None,
+        time: Optional[float] = None,
+    ) -> Union[ScalarField, VectorField]:
+        if grid is None:
+            grid = self.grid
         if not self.vorticity:
-            return self.velocity_eval(grid, velocity)
+            return self.velocity_eval(grid, velocity, time)
         else:
-            return self.vorticity_eval(grid, vorticity)
+            return self.vorticity_eval(grid, vorticity, time)
 
 
 class KolmogorovForcing(ForcingFn):
@@ -166,7 +173,8 @@ class KolmogorovForcing(ForcingFn):
     def velocity_eval(
         self,
         grid: Optional[Grid],
-        velocity: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
+        velocity: Optional[VectorField] = None,
+        time: Optional[float] = None,
     ) -> GridVariableVector:
         offsets = self.offsets
         grid = self.grid if grid is None else grid
@@ -193,7 +201,8 @@ class KolmogorovForcing(ForcingFn):
     def vorticity_eval(
         self,
         grid: Optional[Grid],
-        vorticity: Optional[torch.Tensor] = None,
+        vorticity: Optional[ScalarField] = None,
+        time: Optional[float] = None,
     ) -> GridVariable:
         offsets = self.offsets
         grid = self.grid if grid is None else grid
@@ -224,9 +233,14 @@ class KolmogorovForcing(ForcingFn):
 
 def scalar_potential(potential_func):
     def wrapper(
-        cls, x: torch.Tensor, y: torch.Tensor, s: float, k: float
+        cls,
+        x: torch.Tensor,
+        y: torch.Tensor,
+        s: float,
+        k: float,
+        t: Optional[float] = None,
     ) -> torch.Tensor:
-        return potential_func(x, y, s, k)
+        return potential_func(x, y, s, k, t)
 
     return wrapper
 
@@ -263,18 +277,19 @@ class SimpleSolenoidalForcing(ForcingFn):
         )
 
     @scalar_potential
-    def potential(*args, **kwargs) -> torch.Tensor:
+    def potential(*args, **kwargs) -> ScalarField:
         raise NotImplementedError
 
     @scalar_potential
-    def vort_potential(*args, **kwargs) -> torch.Tensor:
+    def vort_potential(*args, **kwargs) -> ScalarField:
         raise NotImplementedError
 
     def velocity_eval(
         self,
         grid: Optional[Grid],
-        velocity: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
-    ) -> GridVariableVector:
+        velocity: Optional[VectorField] = None,
+        time: Optional[float] = None,
+    ) -> VectorField:
         offsets = self.offsets
         grid = self.grid if grid is None else grid
         domain_factor = 2 * torch.pi / self.diam
@@ -284,22 +299,23 @@ class SimpleSolenoidalForcing(ForcingFn):
         if self.swap_xy:
             x = grid.mesh(offsets[1])[0]
             y = grid.mesh(offsets[0])[1]
-            rot = self.potential(x, y, scale, k)
-            v = GridVariable(rot, offsets[1], grid)
-            u = GridVariable(-rot, (1, 1 / 2), grid)
+            rot = self.potential(x, y, scale, k, time)
+            v = GridVariable(rot.data, offsets[1], grid)
+            u = GridVariable(-rot.data, (1, 1 / 2), grid)
         else:
             x = grid.mesh(offsets[0])[0]
             y = grid.mesh(offsets[1])[1]
-            rot = self.potential(x, y, scale, k)
-            u = GridVariable(rot, offsets[0], grid)
-            v = GridVariable(-rot, (1 / 2, 1), grid)
+            rot = self.potential(x, y, scale, k, time)
+            u = GridVariable(rot.data, offsets[0], grid)
+            v = GridVariable(-rot.data, (1 / 2, 1), grid)
         return GridVariableVector(tuple((u, v)))
 
     def vorticity_eval(
         self,
         grid: Optional[Grid],
-        vorticity: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
+        vorticity: Optional[ScalarField] = None,
+        time: Optional[float] = None,
+    ) -> ScalarField:
         offsets = self.offsets
         grid = self.grid if grid is None else grid
         domain_factor = 2 * torch.pi / self.diam
@@ -309,11 +325,11 @@ class SimpleSolenoidalForcing(ForcingFn):
         if self.swap_xy:
             x = grid.mesh(offsets[1])[0]
             y = grid.mesh(offsets[0])[1]
-            return self.vort_potential(x, y, scale, k)
+            return self.vort_potential(x, y, scale, k, time)
         else:
             x = grid.mesh(offsets[0])[0]
             y = grid.mesh(offsets[1])[1]
-            return self.vort_potential(x, y, scale, k)
+            return self.vort_potential(x, y, scale, k, time)
 
 
 class SinCosForcing(SimpleSolenoidalForcing):
@@ -354,12 +370,137 @@ class SinCosForcing(SimpleSolenoidalForcing):
             **kwargs,
         )
 
-    @scalar_potential
-    def potential(x: torch.Tensor, y: torch.Tensor, s: float, k: float) -> torch.Tensor:
+    def potential(
+        self,
+        x: torch.Tensor,
+        y: torch.Tensor,
+        s: float,
+        k: float,
+        t: Optional[float] = 0.0,
+    ) -> torch.Tensor:
         return s * (torch.sin(k * (x + y)) - torch.cos(k * (x + y)))
 
-    @scalar_potential
     def vort_potential(
-        x: torch.Tensor, y: torch.Tensor, s: float, k: float
+        self,
+        x: torch.Tensor,
+        y: torch.Tensor,
+        s: float,
+        k: float,
+        t: Optional[float] = 0.0,
     ) -> torch.Tensor:
         return s * (torch.cos(k * (x + y)) + torch.sin(k * (x + y)))
+
+
+class PressureGradientForcing(ForcingFn):
+    """
+    Uniform pressure gradient forcing for velocity fields.
+
+    This forcing applies a constant pressure gradient across the domain,
+    resulting in a uniform body force. Commonly used for channel flow
+    simulations where the pressure gradient drives the flow.
+
+    The forcing vector is (pressure_gradient, 0) in 2D, where the first
+    component drives flow in the x-direction and the second component
+    is zero (no y-direction pressure gradient).
+
+    Args:
+        pressure_gradient: magnitude of the pressure gradient in x-direction
+        force_vector: optional custom force vector. If None, defaults to
+                     (pressure_gradient, 0) for 2D
+        grid: computational grid
+        device: torch device for computations
+
+    Example:
+        # Create pressure gradient forcing for channel flow
+        forcing = PressureGradientForcing(
+            grid=grid,
+            pressure_gradient=1.0,  # unit pressure gradient in x-direction
+        )
+
+        # Apply forcing to velocity field
+        force = forcing(velocity=(u, v))
+    """
+
+    def __init__(
+        self,
+        pressure_gradient: float = 1.0,
+        force_vector: Optional[Tuple[float, ...]] = None,
+        *args,
+        **kwargs,
+    ):
+        super().__init__(
+            *args,
+            vorticity=False,  # This is a velocity forcing
+            **kwargs,
+        )
+
+        self.pressure_gradient = pressure_gradient
+
+        # Set default force vector if not provided
+        if force_vector is None:
+            if self.grid.ndim == 2:
+                self.force_vector = (pressure_gradient, 0.0)
+            else:
+                raise ValueError(f"Unsupported grid dimension: {self.grid.ndim}")
+        else:
+            if len(force_vector) != self.grid.ndim:
+                raise ValueError(
+                    f"Force vector length ({len(force_vector)}) must match "
+                    f"grid dimensions ({self.grid.ndim})"
+                )
+            self.force_vector = force_vector
+
+    def velocity_eval(
+        self,
+        grid: Optional[Grid] = None,
+        velocity: Optional[VectorField] = None,
+        time: Optional[float] = None,
+    ) -> VectorField:
+        """
+        Evaluate pressure gradient forcing for velocity field.
+
+        Args:
+            grid: computational grid (uses self.grid if None)
+            velocity: velocity field components (used to get grid structure)
+
+        Returns:
+            GridVariableVector containing the pressure gradient forcing
+        """
+        grid = self.grid if grid is None else grid
+
+        # If velocity is provided, use its structure; otherwise use default offsets
+        if velocity is not None:
+            # Use the same offsets and grids as the velocity components
+            force_components = []
+            for i, (force_magnitude, vel_component) in enumerate(
+                zip(self.force_vector, velocity)
+            ):
+                if isinstance(vel_component, GridVariable):
+                    # Create forcing with same offset and grid as velocity component
+                    force_data = force_magnitude * torch.ones_like(vel_component.data)
+                    force_component = GridVariable(
+                        force_data, vel_component.offset, vel_component.grid
+                    )
+                else:
+                    # Fallback: assume vel_component is a tensor
+                    force_data = force_magnitude * torch.ones_like(vel_component)
+                    force_component = GridVariable(
+                        force_data,
+                        self.offsets[i] if i < len(self.offsets) else grid.cell_center,
+                        grid,
+                    )
+                force_components.append(force_component)
+        else:
+            # Use default offsets (typically cell faces for velocity)
+            force_components = []
+            for i, force_magnitude in enumerate(self.force_vector):
+                offset = self.offsets[i] if i < len(self.offsets) else grid.cell_center
+
+                # Create coordinate meshes to get the right shape
+                coords = grid.mesh(offset)
+                force_data = force_magnitude * torch.ones_like(coords[0])
+
+                force_component = GridVariable(force_data, offset, grid)
+                force_components.append(force_component)
+
+        return GridVariableVector(tuple(force_components))
