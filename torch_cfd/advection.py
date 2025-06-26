@@ -234,8 +234,8 @@ class AdvectAligned(nn.Module):
     def __init__(
         self,
         grid: Grid,
-        bcs_c: Tuple[boundaries.BoundaryConditions, ...],
-        bcs_v: Tuple[boundaries.BoundaryConditions, ...],
+        bcs_c: Tuple[BoundaryConditions, ...],
+        bcs_v: Tuple[BoundaryConditions, ...],
         offsets: Tuple[Tuple[float, ...], ...] = ((1.0, 0.5), (0.5, 1.0)),
         **kwargs,
     ):
@@ -320,7 +320,7 @@ class LinearInterpolation(nn.Module):
         self,
         grid: Grid,
         target_offset: Tuple[float, ...] = (0.5, 0.5),
-        bc: Optional[boundaries.BoundaryConditions] = None,
+        bc: Optional[BoundaryConditions] = None,
         **kwargs,
     ):
         super().__init__()
@@ -453,7 +453,7 @@ class AdvectionBase(nn.Module):
         grid: Grid,
         offset: Tuple[float, ...],
         bc_c: Optional[BoundaryConditions] = None,
-        bc_v: Optional[Tuple[boundaries.BoundaryConditions, ...]] = None,
+        bc_v: Optional[Tuple[BoundaryConditions, ...]] = None,
         limiter: Optional[Callable] = None,
     ) -> None:
         super().__init__()
@@ -469,8 +469,12 @@ class AdvectionBase(nn.Module):
                 for _ in range(grid.ndim)
             ),
         )
+        self.bc_v = bc_v
         self.advect_aligned = AdvectAligned(
-            grid=grid, bcs_c=(bc_c, bc_c), bcs_v=bc_v, offsets=self.target_offsets
+            grid=grid,
+            bcs_c=(bc_c,) * grid.ndim,
+            bcs_v=bc_v,
+            offsets=self.target_offsets,
         )
         self._flux_interp = nn.ModuleList()  # placeholder
         self._velocity_interp = nn.ModuleList()  # placeholder
@@ -536,7 +540,7 @@ class AdvectionLinear(AdvectionBase):
         grid: Grid,
         offset=(0.5, 0.5),
         bc_c: Optional[BoundaryConditions] = None,
-        bc_v: Optional[Tuple[boundaries.BoundaryConditions, ...]] = None,
+        bc_v: Optional[Tuple[BoundaryConditions, ...]] = None,
         **kwargs,
     ):
         super().__init__(grid, offset, bc_c, bc_v)
@@ -571,7 +575,7 @@ class AdvectionUpwind(AdvectionBase):
         grid: Grid,
         offset: Tuple[float, ...] = (0.5, 0.5),
         bc_c: Optional[BoundaryConditions] = None,
-        bc_v: Optional[Tuple[boundaries.BoundaryConditions, ...]] = None,
+        bc_v: Optional[Tuple[BoundaryConditions, ...]] = None,
         **kwargs,
     ):
         super().__init__(grid, offset, bc_c, bc_v)
@@ -605,7 +609,7 @@ class AdvectionVanLeer(AdvectionBase):
         grid: Grid,
         offset: Tuple[float, ...] = (0.5, 0.5),
         bc_c: Optional[BoundaryConditions] = None,
-        bc_v: Optional[Tuple[boundaries.BoundaryConditions, ...]] = None,
+        bc_v: Optional[Tuple[BoundaryConditions, ...]] = None,
         limiter: Callable = van_leer_limiter,
         **kwargs,
     ):
@@ -621,7 +625,7 @@ class AdvectionVanLeer(AdvectionBase):
 
         self._velocity_interp = nn.ModuleList(
             LinearInterpolation(grid, target_offset=offset, bc=bc)
-            for offset, bc in zip(self.target_offsets, bc_v)
+            for offset, bc in zip(self.target_offsets, self.bc_v)
         )
 
 
@@ -654,7 +658,7 @@ class ConvectionVector(nn.Module):
         self,
         grid: Grid,
         offsets: Tuple[Tuple[float, ...], ...] = ((1.0, 0.5), (0.5, 1.0)),
-        bcs: Optional[Tuple[boundaries.BoundaryConditions, ...]] = None,
+        bcs: Optional[Tuple[BoundaryConditions, ...]] = None,
         advect: type[nn.Module] = AdvectionVanLeer,
         limiter: Callable = van_leer_limiter,
         **kwargs,
