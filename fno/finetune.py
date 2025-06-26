@@ -16,7 +16,8 @@ import torch.fft as fft
 import torch.nn as nn
 
 from .sfno import OutConv, SpectralConvT
-from data_gen.solvers import *
+from fno.data_gen.trajectories import imex_crank_nicolson_step, update_residual
+from torch_cfd.spectral import fft_mesh_2d, spectral_laplacian_2d
 from einops import rearrange, repeat
 
 

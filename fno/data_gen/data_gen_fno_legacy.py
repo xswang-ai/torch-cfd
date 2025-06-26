@@ -8,7 +8,7 @@ import torch.fft as fft
 import torch.nn.functional as F
 
 from grf import GRF2d
-from solvers import *
+from fno.data_gen.trajectories import *
 from data_utils import *
 from fno.pipeline import DATA_PATH, LOG_PATH
 

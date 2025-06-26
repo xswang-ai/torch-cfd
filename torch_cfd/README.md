@@ -6,12 +6,19 @@
 - [x] add native PyTorch implementation for applying `torch.linalg` and `torch.fft` function directly on `GridArray` and `GridVariable` (added 0.1.0).
 - [x] add no-slip boundary (added in 0.2.2).
 - [ ] rewrite `shift` and `pad` using `torch.roll`.
-- [x] support for function-valued boundary conditions.
+- [x] support for function-valued boundary conditions (added in 0.2.3).
 - [ ] change the multigrid implementation using convolution kernel.
 - [ ] add a simulation script similar to `funcutils.trajectory` but does not rely on flattening pytrees.
 - [ ] add several validation problems and tests (Taylor-Green, pressure gradient flow)
+- [ ] implement the cut-cell method for immersed boundaries.
 
 # Changelog
+
+### 0.2.6
+- Added an immersed boundary condition by using simple masking (inspired by [an un-merged pull request of Jax-CFD](https://github.com/google/jax-cfd/pull/250) and [Distmesh](http://persson.berkeley.edu/distmesh)).
+- Added an example of von Karman vortex street.
+- Various typings annotation fixes.
+- Removed `equations.py`, changed to [`spectral.py`](./spectral.py) for pseudo-spectral methods.
 
 ### 0.2.5
 - Added two classes that support array-valued or function-valued boundary conditions, while back-compatible with previous single-constant bcs. 

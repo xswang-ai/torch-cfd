@@ -5,7 +5,7 @@
 
 ## A native PyTorch port of [Google's Computational Fluid Dynamics package in Jax](https://github.com/google/jax-cfd)
 This port is a good pedagogical tool to learn how to implement traditional numerical solvers using modern deep learning software interfaces. The main changes are documented in the [`torch_cfd` directory](./torch_cfd/). The most significant changes in all routines include:
-  - (**enhanced**) Nonhomogenous boundary conditions support: the user can provide array-valued or function-valued bcs. Many routines in Jax-CFD only work with only periodic or constant boundary.
+  - (**enhanced**) Nonhomogenous/immersed boundary conditions support: the user can provide array-valued or function-valued boundary conditions, and can add a no-slip mask when there are obstacles. Many routines in Jax-CFD only work with only periodic or constant boundary.
   - (**changed**) Routines that rely on the functional programming of Jax have been rewritten to be the PyTorch's tensor-in-tensor-out style, which is arguably more user-friendly to debugging as one can view intermediate values in tensors in VS Code debugger, opposed to Jax's `JaxprTrace`.
   - (**enhanced**) Batch-dimension: all operations take into consideration the batch dimension of tensors `(b, *, n, m)` regardless of `*` dimension, for example, `(b, T, C, n, m)`, which is similar to PyTorch behavior. In the original Jax-CFD package, only a single trajectory is implemented. The stencil operators are changed to generally operate from the last dimension using negative indexing, following `torch.nn.functional.pad`'s behavior.
   - (**changed**) Neural Network interface: functions and operators are in general implemented as `nn.Module` like a factory template.
@@ -15,11 +15,26 @@ This port is a good pedagogical tool to learn how to implement traditional numer
 ## Neural Operator-Assisted Navier-Stokes Equations simulator.
   - The **Spatiotemporal Fourier Neural Operator** (SFNO) is a spacetime tensor-to-tensor learner (or trajectory-to-trajectory), available in the [`fno` directory](./fno). Different components of FNO have been re-implemented keeping the conciseness of the original implementation while allowing modern expansions. We draw inspiration from the [3D FNO in Nvidia's Neural Operator repo](https://github.com/neuraloperator/neuraloperator), [Transformers-based neural operators](https://github.com/thuml/Neural-Solver-Library), as well as Temam's book on functional analysis for the NSE. 
   - Major architectural changes: learnable spatiotemporal positional encodings, layernorm to replace a hard-coded global Gaussian normalizer, and many others. For more details please see [the documentation of the `SFNO` class](./fno/sfno.py#L485). 
-  - Data generation for the meta-example of the isotropic turbulence in [McWilliams1984]. After the warmup phase, the energy spectra match the inverse cascade of Kolmogorov flow in a periodic box.
+  - Data generations:
+    - Isotropic turbulence in McWilliams, J. C. (1984). The emergence of isolated coherent vortices in turbulent flow. *Journal of Fluid Mechanics*, 146, 21-43. After the warmup phase, the energy spectra match the direct cascade in a periodic box.
+    - Forced turbulence example: Kolmogorov flow with inverse cascades.
   - Pipelines for the *a posteriori* error estimation to fine-tune the SFNO to reach the scientific computing level of accuracy ($\le 10^{-6}$) in Bochner norm using FLOPs on par with a single evaluation, and only a fraction of FLOPs of a single `.backward()`.
   - [Examples](#examples) can be found below.
 
-[McWilliams1984]: McWilliams, J. C. (1984). The emergence of isolated coherent vortices in turbulent flow. *Journal of Fluid Mechanics*, 146, 21-43.
+
+## Examples
+- Demos of different simulation setups:
+  - [von Kármán vortex street](./examples/von_Karman_vortex_rk4_fvm.ipynb)
+  - [2D Lid-driven cavity with a random field perturbation using finite volume](./examples/Lid-driven_cavity_rk4_fvm.ipynb)
+  - [2D decaying isotropic turbulence using the pseudo-spectral method](./examples/Kolmogrov2d_rk4_spectral_forced_turbulence.ipynb)
+  - [2D Kolmogorov flow using finite volume method](./examples/Kolmogrov2d_rk4_fvm_forced_turbulence.ipynb)
+- Demos of Spatiotemporal FNO's training and evaluation using the neural operator-assisted fluid simulation pipelines
+  - [Training of SFNO for only 15 epochs for the isotropic turbulence example](./examples/ex2_SFNO_train.ipynb)
+  - [Training of SFNO for only ***10*** epochs with 1k samples and reach `1e-2` level of relative error](./examples/ex2_SFNO_train_fnodata.ipynb) using the data in the FNO paper, which to our best knowledge no operator learner can do this in <100 epochs in the small data regime.
+  - [Fine-tuning of SFNO on a `256x256` grid for only 50 ADAM iterations to reach `1e-6` residual in the functional norm using FNO data](./examples/ex2_SFNO_finetune_fnodata.ipynb)
+  - [Fine-tuning of SFNO on the `256x256` grid for the McWilliams 2d isotropic turbulence](./examples/ex2_SFNO_finetune_McWilliams2d.ipynb)
+  - [Training of SFNO for only 5 epoch to match the inverse cascade of Kolmogorov flow](./examples/ex2_SFNO_5ep_spectra.ipynb)
+  - [Baseline of FNO3d for fixed step size that requires preloading a normalizer](./examples/ex2_FNO3d_train_normalized.ipynb)
 
 ## Installation
 To install `torch-cfd`'s current release, simply do:
@@ -38,30 +53,20 @@ pip install -r requirements.txt
 The data are available at [https://huggingface.co/datasets/scaomath/navier-stokes-dataset](https://huggingface.co/datasets/scaomath/navier-stokes-dataset).
 Data generation instructions are available in the [SFNO folder](./fno).
 
-
-## Examples
-- Demos of different simulation setups:
-  - [2D Lid-driven cavity with a random field perturbation using finite volume](./examples/Lid-driven_cavity_rk4_fvm.ipynb)
-  - [2D decaying isotropic turbulence using the pseudo-spectral method](./examples/Kolmogrov2d_rk4_spectral_forced_turbulence.ipynb)
-  - [2D Kolmogorov flow using finite volume method](./examples/Kolmogrov2d_rk4_fvm_forced_turbulence.ipynb)
-- Demos of Spatiotemporal FNO's training and evaluation using the neural operator-assisted fluid simulation pipelines
-  - [Training of SFNO for only 15 epochs for the isotropic turbulence example](./examples/ex2_SFNO_train.ipynb)
-  - [Training of SFNO for only ***10*** epochs with 1k samples and reach `1e-2` level of relative error](./examples/ex2_SFNO_train_fnodata.ipynb) using the data in the FNO paper, which to our best knowledge no operator learner can do this in <100 epochs in the small data regime.
-  - [Fine-tuning of SFNO on a `256x256` grid for only 50 ADAM iterations to reach `1e-6` residual in the functional norm using FNO data](./examples/ex2_SFNO_finetune_fnodata.ipynb)
-  - [Fine-tuning of SFNO on the `256x256` grid for the McWilliams 2d isotropic turbulence](./examples/ex2_SFNO_finetune_McWilliams2d.ipynb)
-  - [Training of SFNO for only 5 epoch to match the inverse cascade of Kolmogorov flow](./examples/ex2_SFNO_5ep_spectra.ipynb)
-  - [Baseline of FNO3d for fixed step size that requires preloading a normalizer](./examples/ex2_FNO3d_train_normalized.ipynb)
-
 ## Licenses
 The Apache 2.0 License in the root folder applies to the `torch-cfd` folder of the repo that is inherited from Google's original license file for `Jax-cfd`. The `fno` folder has the MIT license inherited from [NVIDIA's Neural Operator repo](https://github.com/neuraloperator/neuraloperator). Note: the license(s) in the subfolder takes precedence.
 
 ## Contributions
-PR welcome. Currently, the port of `torch-cfd` currently includes:
+PR welcome for enhancing [essential functionalities with TODO tags](./torch_cfd/README.md). Currently, the port of `torch-cfd` currently includes:
 - The pseudospectral method for vorticity uses anti-aliasing filtering techniques for nonlinear terms to maintain stability.
-- The finite volume method on a MAC grids for velocity, and using the projection scheme to impose the divergence free condition.
+- The finite volume method using MAC grids for velocity, together with a simple pressure projection scheme to impose the divergence free condition.
 - Temporal discretization: Currently it has only single-step RK4-family schemes uses explicit time-stepping for advection, either implicit or explicit time-stepping for diffusion.
-- Boundary conditions: periodic and Dirichlet boundary conditions for velocity, Neumann boundary for pressure.
-- Solvers: pseudoinverse (either FFT-based or SVD based), Jacobi- or Multigrid V-cycle-preconditioned Conjugate gradient.
+- Boundary conditions: 
+  - velocity: periodic, Dirichlet (function-valued or array-valued), Dirichlet-Neumann (Neumann has to be 0-valued).
+  - pressure: periodic, Neumann, Neumann-Dirichlet mixed. 
+- Solvers: 
+  - Pseudo-inverse (either FFT-based or SVD based)
+  - Jacobi-, Gauss-Seidel-, or Multigrid V-cycle-preconditioned Conjugate gradient.
 
 ## Reference
 

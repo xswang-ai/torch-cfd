@@ -14,11 +14,11 @@ import torch.fft as fft
 import torch.nn.functional as F
 
 from torch_cfd.grids import Grid
-from torch_cfd.equations import *
+from torch_cfd.spectral import *
 from torch_cfd.forcings import SinCosForcing
 
 from grf import GRF2d
-from solvers import get_trajectory_imex
+from fno.data_gen.trajectories import get_trajectory_imex
 from data_utils import *
 import logging
 

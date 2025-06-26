@@ -17,8 +17,8 @@ from torch_cfd.forcings import KolmogorovForcing
 
 from torch_cfd.grids import Grid
 from torch_cfd.initial_conditions import filtered_velocity_field
-from torch_cfd.equations import *
-from data_gen.solvers import get_trajectory_imex
+from torch_cfd.spectral import *
+from fno.data_gen.trajectories import get_trajectory_imex
 
 from data_utils import *
 
