@@ -56,7 +56,6 @@ def main(args):
     total_samples = args.num_samples
     batch_size = args.batch_size  # 128
     assert batch_size <= total_samples, "batch_size <= num_samples"
-    assert total_samples % batch_size == 0, "total_samples divisible by batch_size"
     n = args.grid_size  # 256
     viscosity = args.visc if args.Re is None else 1 / args.Re
     Re = 1 / viscosity
@@ -141,20 +140,26 @@ def main(args):
         step_fn=RK4CrankNicolsonStepper(),
     ).to(device)
 
-    num_batches = total_samples // batch_size
+    # Calculate batch indices and sizes
+    batch_info = []
+    for idx in range(0, total_samples, batch_size):
+        current_batch_size = min(batch_size, total_samples - idx)
+        batch_info.append((idx, current_batch_size))
+    
+    num_batches = len(batch_info)
     
     # Calculate which batches need to be processed
     remaining_batches = []
-    for i, idx in enumerate(range(0, total_samples, batch_size)):
+    for i, (idx, current_batch_size) in enumerate(batch_info):
         if i not in completed_batches:
-            remaining_batches.append((i, idx))
+            remaining_batches.append((i, idx, current_batch_size))
     
     logger.info(f"Processing {len(remaining_batches)} remaining batches out of {num_batches} total")
     
-    for batch_idx, (i, idx) in enumerate(remaining_batches):
+    for batch_idx, (i, idx, current_batch_size) in enumerate(remaining_batches):
         logger.info(f"Generate trajectory for batch [{i+1}/{num_batches}] (remaining: {len(remaining_batches) - batch_idx})")
         logger.info(
-            f"random states: {random_state + idx} to {random_state + idx + batch_size-1}"
+            f"random states: {random_state + idx} to {random_state + idx + current_batch_size-1} (batch size: {current_batch_size})"
         )
 
         vort_init = torch.stack(
@@ -162,7 +167,7 @@ def main(args):
                 filtered_vorticity_field(
                     grid, peak_wavenumber, random_state=random_state + idx + k
                 ).data
-                for k in range(batch_size)
+                for k in range(current_batch_size)
             ]
         )
         vort_hat = fft.rfft2(vort_init).to(device)
@@ -198,17 +203,17 @@ def main(args):
                 f"saved variable: {field:<12} | shape: {value.shape} | dtype: {value.dtype}"
             )
             if subsample > 1:
-                # Reshape from (batch, time, height, width) to (batch*time, 1, height, width)
+                # Reshape from (batch, 1, time, height, width) to (batch*time, 1, height, width)
                 # for interpolation, then reshape back
-                batch_size, _, time_steps, height, width = value.shape
-                value_reshaped = value.view(batch_size * time_steps, 1, height, width)
+                current_batch_size, _, time_steps, height, width = value.shape
+                value_reshaped = value.view(current_batch_size * time_steps, 1, height, width)
                 value_interp = F.interpolate(value_reshaped, size=(ns, ns), mode="bilinear")
-                result[field] = value_interp.view(batch_size, time_steps, ns, ns)
+                result[field] = value_interp.view(current_batch_size, 1, time_steps, ns, ns)
             else:
                 result[field] = value
 
         result["random_states"] = torch.tensor(
-            [random_state + idx + k for k in range(batch_size)], dtype=torch.int32
+            [random_state + idx + k for k in range(current_batch_size)], dtype=torch.int32
         )
         if not args.demo:
             save_pickle(result, data_filepath, append=True)
