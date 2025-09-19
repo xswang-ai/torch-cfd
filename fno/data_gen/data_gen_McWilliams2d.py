@@ -108,17 +108,6 @@ def main(args):
             logger.warning(f"Could not load progress file: {e}")
             completed_batches = set()
     
-    if os.path.exists(data_filepath) and not force_rerun:
-        logger.info(f"Data already exists at {data_filepath}")
-        return
-    elif os.path.exists(data_filepath) and force_rerun:
-        logger.info(f"Force rerun and save data to {data_filepath}")
-        os.remove(data_filepath)
-        if os.path.exists(progress_filepath):
-            os.remove(progress_filepath)
-        completed_batches = set()
-    else:
-        logger.info(f"Save data to {data_filepath}")
 
     cuda = not args.no_cuda and torch.cuda.is_available()
     no_tqdm = args.no_tqdm
