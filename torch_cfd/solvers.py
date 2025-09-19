@@ -18,7 +18,7 @@
 """Collections of linear system solvers."""
 
 from functools import partial, reduce
-from typing import Any, Callable, List, Optional, Sequence
+from typing import Any, Callable, List, Optional, Sequence, Union
 
 import torch
 import torch.fft as fft
@@ -34,7 +34,7 @@ BoundaryConditions = grids.BoundaryConditions
 
 def _set_laplacian(
     module: nn.Module,
-    laplacians: List[torch.Tensor] | None,
+    laplacians: Optional[List[torch.Tensor]],
     grid: Grid,
     bc: BoundaryConditions,
     device: Optional[torch.device] = None,
@@ -97,7 +97,7 @@ class SolverBase(nn.Module):
     def __init__(
         self,
         grid: grids.Grid,
-        bc: BoundaryConditions | None = None,
+        bc: Optional[BoundaryConditions] = None,
         dtype: torch.dtype = torch.float32,
         laplacians: Optional[List[torch.Tensor]] = None,
         tol: float = 1e-8,
@@ -675,7 +675,7 @@ class ConjugateGradient(IterativeSolver):
         check_iter: int = 10,
         record_residuals: bool = False,
         pure_neumann: bool = False,
-        preconditioner: Optional[str | Callable] = None,
+        preconditioner: Optional[Union[str, Callable]] = None,
     ):
         super().__init__(
             grid, bc, dtype, laplacians, tol, max_iter, check_iter, record_residuals

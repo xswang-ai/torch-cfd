@@ -15,7 +15,7 @@ def default(value, d):
 
 
 current_path = os.path.abspath(__file__)
-SRC_ROOT = os.path.dirname(current_path)
+SRC_ROOT = "/scratch3/wan410/operator_learning_data/NS_torchcfd" if torch.cuda.is_available() else os.path.dirname(current_path)
 ROOT = os.path.dirname(SRC_ROOT)
 MODEL_PATH = default(os.environ.get("MODEL_PATH"), os.path.join(SRC_ROOT, "models"))
 LOG_PATH = default(os.environ.get("LOG_PATH"), os.path.join(SRC_ROOT, "logs"))

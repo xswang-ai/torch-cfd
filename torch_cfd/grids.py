@@ -45,7 +45,7 @@ class BCType:
 
 
 BCValue = Union[torch.Tensor, None]
-BCValues = Tuple[BCValue, BCValue] | Sequence[Tuple[BCValue, BCValue]]
+BCValues = Union[Tuple[BCValue, BCValue], Sequence[Tuple[BCValue, BCValue]]]
 
 
 class Padding:

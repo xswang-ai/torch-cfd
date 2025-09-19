@@ -12,7 +12,9 @@ import os
 import torch
 import torch.fft as fft
 import torch.nn.functional as F
-
+import sys
+sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+print("sys.path", sys.path)
 from torch_cfd.grids import Grid
 from torch_cfd.spectral import *
 from torch_cfd.forcings import SinCosForcing

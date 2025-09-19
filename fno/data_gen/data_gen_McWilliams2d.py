@@ -12,7 +12,8 @@ import os
 import torch
 import torch.fft as fft
 import torch.nn.functional as F
-
+import sys
+sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 from torch_cfd.grids import Grid
 from torch_cfd.initial_conditions import filtered_vorticity_field
 from torch_cfd.spectral import *
@@ -171,7 +172,12 @@ def main(args):
                 f"saved variable: {field:<12} | shape: {value.shape} | dtype: {value.dtype}"
             )
             if subsample > 1:
-                result[field] = F.interpolate(value, size=(ns, ns), mode="bilinear")
+                # Reshape from (batch, time, height, width) to (batch*time, 1, height, width)
+                # for interpolation, then reshape back
+                batch_size, _, time_steps, height, width = value.shape
+                value_reshaped = value.view(batch_size * time_steps, 1, height, width)
+                value_interp = F.interpolate(value_reshaped, size=(ns, ns), mode="bilinear")
+                result[field] = value_interp.view(batch_size, time_steps, ns, ns)
             else:
                 result[field] = value
 
