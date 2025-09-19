@@ -95,12 +95,29 @@ def main(args):
         filename = f"McWilliams2d{dtype_str}_{ns}x{ns}_N{total_samples}_Re{int(Re)}_T{num_snapshots}.pt"
         args.filename = filename
     data_filepath = os.path.join(DATA_PATH, filename)
+    progress_filepath = data_filepath.replace('.pt', '_progress.pkl')
+    
+    # Check for resume capability
+    completed_batches = set()
+    if os.path.exists(progress_filepath):
+        try:
+            import pickle
+            with open(progress_filepath, 'rb') as f:
+                completed_batches = pickle.load(f)
+            logger.info(f"Found progress file with {len(completed_batches)} completed batches")
+        except Exception as e:
+            logger.warning(f"Could not load progress file: {e}")
+            completed_batches = set()
+    
     if os.path.exists(data_filepath) and not force_rerun:
         logger.info(f"Data already exists at {data_filepath}")
         return
     elif os.path.exists(data_filepath) and force_rerun:
         logger.info(f"Force rerun and save data to {data_filepath}")
         os.remove(data_filepath)
+        if os.path.exists(progress_filepath):
+            os.remove(progress_filepath)
+        completed_batches = set()
     else:
         logger.info(f"Save data to {data_filepath}")
 
@@ -125,8 +142,17 @@ def main(args):
     ).to(device)
 
     num_batches = total_samples // batch_size
+    
+    # Calculate which batches need to be processed
+    remaining_batches = []
     for i, idx in enumerate(range(0, total_samples, batch_size)):
-        logger.info(f"Generate trajectory for batch [{i+1}/{num_batches}]")
+        if i not in completed_batches:
+            remaining_batches.append((i, idx))
+    
+    logger.info(f"Processing {len(remaining_batches)} remaining batches out of {num_batches} total")
+    
+    for batch_idx, (i, idx) in enumerate(remaining_batches):
+        logger.info(f"Generate trajectory for batch [{i+1}/{num_batches}] (remaining: {len(remaining_batches) - batch_idx})")
         logger.info(
             f"random states: {random_state + idx} to {random_state + idx + batch_size-1}"
         )
@@ -186,10 +212,22 @@ def main(args):
         )
         if not args.demo:
             save_pickle(result, data_filepath, append=True)
+            
+            # Update progress tracking
+            completed_batches.add(i)
+            import pickle
+            with open(progress_filepath, 'wb') as f:
+                pickle.dump(completed_batches, f)
+            logger.info(f"Completed batch {i+1}/{num_batches}, progress saved")
+            
             del result
 
     if not args.demo:
         pickle_to_pt(data_filepath)
+        # Clean up progress file on successful completion
+        if os.path.exists(progress_filepath):
+            os.remove(progress_filepath)
+            logger.info("Progress file cleaned up after successful completion")
         logger.info(f"Done saving.")
     else:
         try:
