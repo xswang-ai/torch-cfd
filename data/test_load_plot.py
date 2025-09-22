@@ -12,7 +12,7 @@ matplotlib.use('Agg')
 
 # path = "/Users/wan410/Documents/VSCode/torch-cfd/data/fnodata_extra_128x128_N2_v1e-3_T50_steps100_alpha2.5_tau7.pt"
 # path = "/Users/wan410/Documents/VSCode/torch-cfd/data/McWilliams2d_128x128_N2_Re1000_T100.pt"
-path = "/Users/wan410/Documents/VSCode/torch-cfd/data/McWilliams2d_128x128_N2_Re5e+03_T100.pt"
+path = "/Users/wan410/Documents/VSCode/torch-cfd/fno/data/McWilliams2d_128x128_N2_Re5000_T100.pt"
 if os.path.exists(path):
     try:
         with open(path, 'rb') as f:
@@ -26,7 +26,7 @@ else:
 
 
 # Extract vorticity data: shape (1, 100, 128, 128) -> (128, 128, 100)
-vorticity = data['vorticity'][0].numpy()  # Remove batch dimension
+vorticity = data['vorticity'][0].squeeze().numpy()  # Remove batch dimension
 vorticity = np.transpose(vorticity, (1, 2, 0))  # (H, W, T) = (128, 128, 100)
 
 print(f"Vorticity shape: {vorticity.shape}")
