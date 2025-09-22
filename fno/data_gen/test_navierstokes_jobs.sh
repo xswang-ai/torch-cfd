@@ -32,6 +32,6 @@ python3 data_gen_McWilliams2d.py --num-samples 500 --batch-size 256 --grid-size 
 # training
 # python data_gen_McWilliams2d.py --num-samples 1152 --batch-size 128 --grid-size 512 --subsample 4 --Re 5e3 --dt 5e-4 --time 10 --time-warmup 4.5 --num-steps 100 --diam "2*torch.pi"
 # validation
-# python data_gen_McWilliams2d.py --num-samples 200 --batch-size 256 --grid-size 512 --subsample 1 --Re 5e3 --dt 5e-4 --time 10 --time-warmup 4.5 --num-steps 100 --diam "2*torch.pi" --seed 0
+# python data_gen_McWilliams2d.py --num-samples 256 --batch-size 256 --grid-size 512 --subsample 4 --Re 5e3 --dt 5e-4 --time 10 --time-warmup 4.5 --num-steps 100 --diam "2*torch.pi" --seed 0
 # # test
-# python data_gen_McWilliams2d.py --num-samples 200 --batch-size 256 --grid-size 512 --subsample 1 --Re 5e3 --dt 5e-4 --time 10 --time-warmup 4.5 --num-steps 100 --diam "2*torch.pi" --seed 500
+# python data_gen_McWilliams2d.py --num-samples 500 --batch-size 256 --grid-size 512 --subsample 4 --Re 5e3 --dt 5e-4 --time 10 --time-warmup 4.5 --num-steps 100 --diam "2*torch.pi" --seed 500
