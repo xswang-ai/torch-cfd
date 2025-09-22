@@ -18,8 +18,20 @@ module load tensorflow/2.16.1-pip-py312-cuda122
 source $HOME/.venvs/pytorch/bin/activate
 
 # python3 data_gen_fno.py --num-samples 500 --batch-size 256 --grid-size 256 --subsample 2 --extra-vars --time 50 --time-warmup 30 --num-steps 100 --dt 1e-3 --visc 1e-3
+
+## McWilliams 2d Re=1000
+# training
 # python3 data_gen_McWilliams2d.py --num-samples 5000 --batch-size 256 --grid-size 256 --subsample 2 --visc 1e-3 --dt 1e-3 --time 10 --time-warmup 4.5 --num-steps 100 --diam "2*torch.pi"
+# validation
+python3 data_gen_McWilliams2d.py --num-samples 256 --batch-size 256 --grid-size 256 --subsample 2 --visc 1e-3 --dt 1e-3 --time 10 --time-warmup 4.5 --num-steps 100 --diam "2*torch.pi" --seed 0
+# test
+# python3 data_gen_McWilliams2d.py --num-samples 200 --batch-size 256 --grid-size 256 --subsample 2 --visc 1e-3 --dt 1e-3 --time 10 --time-warmup 4.5 --num-steps 100 --diam "2*torch.pi" --seed 500
 
-python3 data_gen_McWilliams2d.py --num-samples 200 --batch-size 256 --grid-size 256 --subsample 2 --visc 1e-3 --dt 1e-3 --time 10 --time-warmup 4.5 --num-steps 100 --diam "2*torch.pi" --seed 0
 
-python3 data_gen_McWilliams2d.py --num-samples 200 --batch-size 256 --grid-size 256 --subsample 2 --visc 1e-3 --dt 1e-3 --time 10 --time-warmup 4.5 --num-steps 100 --diam "2*torch.pi" --seed 500
+# McWilliams 2d Re=5000
+# training
+# python data_gen_McWilliams2d.py --num-samples 1152 --batch-size 128 --grid-size 512 --subsample 4 --Re 5e3 --dt 5e-4 --time 10 --time-warmup 4.5 --num-steps 100 --diam "2*torch.pi"
+# validation
+# python data_gen_McWilliams2d.py --num-samples 200 --batch-size 256 --grid-size 512 --subsample 1 --Re 5e3 --dt 5e-4 --time 10 --time-warmup 4.5 --num-steps 100 --diam "2*torch.pi" --seed 0
+# # test
+# python data_gen_McWilliams2d.py --num-samples 200 --batch-size 256 --grid-size 512 --subsample 1 --Re 5e3 --dt 5e-4 --time 10 --time-warmup 4.5 --num-steps 100 --diam "2*torch.pi" --seed 500
