@@ -55,6 +55,8 @@ def main(args):
 
     total_samples = args.num_samples
     batch_size = args.batch_size  # 128
+    if batch_size > total_samples:
+        batch_size = total_samples
     assert batch_size <= total_samples, "batch_size <= num_samples"
     n = args.grid_size  # 256
     viscosity = args.visc if args.Re is None else 1 / args.Re
