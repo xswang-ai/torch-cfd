@@ -20,6 +20,6 @@ source $HOME/.venvs/pytorch/bin/activate
 # python3 data_gen_fno.py --num-samples 500 --batch-size 256 --grid-size 256 --subsample 2 --extra-vars --time 50 --time-warmup 30 --num-steps 100 --dt 1e-3 --visc 1e-3
 # python3 data_gen_McWilliams2d.py --num-samples 5000 --batch-size 256 --grid-size 256 --subsample 2 --visc 1e-3 --dt 1e-3 --time 10 --time-warmup 4.5 --num-steps 100 --diam "2*torch.pi"
 
-python3 data_gen_McWilliams2d.py --num-samples 200 --grid-size 256 --subsample 2 --visc 1e-3 --dt 1e-3 --time 10 --time-warmup 4.5 --num-steps 100 --diam "2*torch.pi" --seed 0
+python3 data_gen_McWilliams2d.py --num-samples 200 --batch-size 256 --grid-size 256 --subsample 2 --visc 1e-3 --dt 1e-3 --time 10 --time-warmup 4.5 --num-steps 100 --diam "2*torch.pi" --seed 0
 
-python3 data_gen_McWilliams2d.py --num-samples 200 --grid-size 256 --subsample 2 --visc 1e-3 --dt 1e-3 --time 10 --time-warmup 4.5 --num-steps 100 --diam "2*torch.pi" --seed 1
+python3 data_gen_McWilliams2d.py --num-samples 200 --batch-size 256 --grid-size 256 --subsample 2 --visc 1e-3 --dt 1e-3 --time 10 --time-warmup 4.5 --num-steps 100 --diam "2*torch.pi" --seed 500
