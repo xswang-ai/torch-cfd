@@ -34,7 +34,7 @@ source $HOME/.venvs/pytorch/bin/activate
 
 # McWilliams 2d Re=5000
 # training
-python data_gen_McWilliams2d.py --num-samples 1 --batch-size 256 --grid-size 256 --subsample 2 --Re 5e3 --dt 5e-4 --time 100 --time-warmup 18 --num-steps 100 --diam "2*torch.pi"
+python data_gen_McWilliams2d.py --num-samples 1 --batch-size 256 --grid-size 512 --subsample 4 --Re 5e3 --dt 5e-4 --time 10 --time-warmup 4.5 --num-steps 30 --diam "2*torch.pi"
 # # validation
 # python data_gen_McWilliams2d.py --num-samples 256 --batch-size 256 --grid-size 512 --subsample 4 --Re 5e3 --dt 5e-4 --time 10 --time-warmup 4.5 --num-steps 100 --diam "2*torch.pi" --seed 0
 # # # test
