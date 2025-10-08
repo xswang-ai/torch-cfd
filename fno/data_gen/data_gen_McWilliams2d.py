@@ -17,7 +17,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(
 from torch_cfd.grids import Grid
 from torch_cfd.initial_conditions import filtered_vorticity_field
 from torch_cfd.spectral import *
-
+from torch_cfd.forcings import PressureGradientForcing
 from fno.data_gen.trajectories import get_trajectory_imex
 from data_utils import *
 
@@ -113,7 +113,7 @@ def main(args):
 
     cuda = not args.no_cuda and torch.cuda.is_available()
     no_tqdm = args.no_tqdm
-    device = torch.device("cuda:0" if cuda else "cpu")
+    device = torch.device("cuda" if cuda else "cpu")
 
     torch.set_default_dtype(torch.float64)
     logger.info(
@@ -127,7 +127,13 @@ def main(args):
         grid=grid,
         drag=0,
         smooth=True,
-        forcing_fn=None,
+        # forcing_fn=None,
+        forcing_fn=PressureGradientForcing(
+            pressure_gradient=5.0,
+            force_vector=(0, 1.0),
+            grid=grid,
+
+        ), # add forcing
         step_fn=RK4CrankNicolsonStepper(),
     ).to(device)
 

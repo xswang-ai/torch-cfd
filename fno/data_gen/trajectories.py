@@ -16,7 +16,6 @@ TQDM_ITERS = 200
 # TODO
 # [x] removes dupes with torch_cfd module
 
-
 def backdiff(x, order: int = 3):
     """
     bdf scheme for x: (b, *, x, y, t)
@@ -218,6 +217,8 @@ def get_trajectory_imex(
     psi_all = []
     w = w0
     n = w0.size(-1)
+    ux_all = []
+    vy_all = []
     tqdm_iters = num_steps if TQDM_ITERS > num_steps else TQDM_ITERS
     update_every_iters = num_steps // tqdm_iters
     with tqdm(total=num_steps, disable=not pbar) as pb:
@@ -250,17 +251,19 @@ def get_trajectory_imex(
                 w_, dwdt_, psi, res = [
                     var.detach().to(dtype).cpu().clone() for var in [w, dwdt, psi, res]
                 ]
-
+                u, v = spectral_rot_2d(psi, equation.grid.rfft_mesh())
                 w_all.append(w_)
                 psi_all.append(psi)
                 dwdt_all.append(dwdt_)
                 res_all.append(res)
+                ux_all.append(u)
+                vy_all.append(v)
 
     result = {
         var_name: torch.stack(var, dim=-3)
         for var_name, var in zip(
-            ["vorticity", "stream", "vort_t", "residual"],
-            [w_all, psi_all, dwdt_all, res_all],
+            ["vorticity", "stream", "vort_t", "residual", "ux", "vy"],
+            [w_all, psi_all, dwdt_all, res_all, ux_all, vy_all],
         )
     }
     return result
