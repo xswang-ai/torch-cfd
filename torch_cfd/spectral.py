@@ -66,6 +66,8 @@ def spectral_div_2d(vhat, rfft_mesh):
 
 def spectral_grad_2d(vhat, rfft_mesh):
     kx, ky = rfft_mesh
+    kx = kx.to(vhat.device)
+    ky = ky.to(vhat.device)
     return 2j * torch.pi * kx * vhat, 2j * torch.pi * ky * vhat
 
 
