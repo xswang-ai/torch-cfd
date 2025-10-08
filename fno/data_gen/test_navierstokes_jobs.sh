@@ -1,7 +1,7 @@
 #!/bin/bash
 # This script produces 5.2k training, 1.3k valid, and 1.3k test trajectories of the Navier-Stokes dataset.
 
-#SBATCH --time=01:30:00
+#SBATCH --time=05:00:00
 
 #SBATCH --mem=256gb
 #SBATCH --nodes=1
@@ -33,7 +33,7 @@ source $HOME/.venvs/pytorch/bin/activate
 
 # McWilliams 2d Re=5000
 # training
-python data_gen_McWilliams2d.py --num-samples 5000 --batch-size 256 --grid-size 512 --subsample 4 --Re 5e3 --dt 5e-4 --time 10 --time-warmup 4.5 --num-steps 30 --diam "2*torch.pi"
+python data_gen_McWilliams2d.py --num-samples 1000 --batch-size 256 --grid-size 512 --subsample 4 --Re 5e3 --dt 5e-4 --time 10 --time-warmup 4.5 --num-steps 30 --diam "2*torch.pi"
 # # validation
 # python data_gen_McWilliams2d.py --num-samples 256 --batch-size 256 --grid-size 512 --subsample 4 --Re 5e3 --dt 5e-4 --time 10 --time-warmup 4.5 --num-steps 100 --diam "2*torch.pi" --seed 0
 # # # test
