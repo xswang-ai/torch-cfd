@@ -1,7 +1,7 @@
 #!/bin/bash
 # This script produces 5.2k training, 1.3k valid, and 1.3k test trajectories of the Navier-Stokes dataset.
 
-#SBATCH --time=00:30:00
+#SBATCH --time=01:30:00
 
 #SBATCH --mem=256gb
 #SBATCH --nodes=1
@@ -13,7 +13,6 @@
 # module load numpy/2.0.0-py312
 module load pytorch/2.5.1-py312-cu122-mpi
 module load parallel python
-module load tensorflow/2.16.1-pip-py312-cuda122
 # source /scratch3/wan410/venvs/testing/bin/activate
 source $HOME/.venvs/pytorch/bin/activate
 
