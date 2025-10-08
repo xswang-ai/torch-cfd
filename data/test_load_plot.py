@@ -26,7 +26,8 @@ else:
         data = pickle.load(f)
 
 # var_name = 'vorticity'
-var_name = 'ux'
+# var_name = 'ux'
+var_name = 'vy'
 
 # Extract vorticity data: shape (1, 100, 128, 128) -> (128, 128, 100)
 vorticity = data[var_name][0].squeeze().numpy()  # Remove batch dimension
