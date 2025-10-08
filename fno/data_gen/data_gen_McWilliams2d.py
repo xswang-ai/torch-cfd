@@ -127,13 +127,12 @@ def main(args):
         grid=grid,
         drag=0,
         smooth=True,
-        # forcing_fn=None,
-        forcing_fn=PressureGradientForcing(
-            pressure_gradient=5.0,
-            force_vector=(0, 1.0),
-            grid=grid,
-
-        ), # add forcing
+        forcing_fn=None,
+        # forcing_fn=PressureGradientForcing(
+        #     pressure_gradient=5.0,
+        #     force_vector=(0, 1.0),
+        #     grid=grid,
+        # ), # add forcing
         step_fn=RK4CrankNicolsonStepper(),
     ).to(device)
 
