@@ -251,7 +251,7 @@ def get_trajectory_imex(
                 w_, dwdt_, psi, res = [
                     var.detach().to(dtype).cpu().clone() for var in [w, dwdt, psi, res]
                 ]
-                u, v = spectral_rot_2d(psi.detach().cpu(), equation.grid.rfft_mesh().detach().cpu())
+                u, v = spectral_rot_2d(psi.detach().cpu(), equation.grid.rfft_mesh())
                 w_all.append(w_)
                 psi_all.append(psi)
                 dwdt_all.append(dwdt_)
